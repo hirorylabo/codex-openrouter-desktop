@@ -89,8 +89,10 @@ set -e
 
 process_table="$(/bin/ps -axo pid=,command=)" || fail "process listを取得できません。"
 existing=()
-while IFS= read -r line; do
-  [[ "$line" == *"$EXECUTABLE"* ]] && existing+=("$line")
+while read -r pid command_line; do
+  [[ "$pid" == <-> ]] || continue
+  [[ "$command_line" == "$EXECUTABLE" || "$command_line" == "$EXECUTABLE"\ * ]] && \
+    existing+=("$pid $command_line")
 done <<< "$process_table"
 (( ${#existing[@]} <= 1 )) || fail "専用app main processが複数あります。通常終了してください。"
 if (( ${#existing[@]} == 1 )); then

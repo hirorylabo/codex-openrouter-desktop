@@ -365,11 +365,17 @@ def authenticated_json(url: str, key: str) -> dict:
 def generation_metadata(key: str, generation_id: str) -> dict:
     url = "https://openrouter.ai/api/v1/generation?id=" + urllib.parse.quote(generation_id)
     last: dict = {}
-    for _attempt in range(5):
-        last = authenticated_json(url, key).get("data", {})
-        if isinstance(last, dict) and last.get("provider_name"):
-            return last
-        time.sleep(1)
+    for attempt in range(10):
+        try:
+            last = authenticated_json(url, key).get("data", {})
+            if isinstance(last, dict) and last.get("provider_name"):
+                return last
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            last = {}
+        if attempt < 9:
+            time.sleep(2)
     return last if isinstance(last, dict) else {}
 
 
@@ -446,6 +452,19 @@ def check_network(doctor: Doctor, registry: dict, expected_models: tuple[str, ..
         doctor.fail(f"OpenRouter network canary失敗: {type(error).__name__}: {error}")
 
 
+def openrouter_main_processes(process_table: str) -> list[str]:
+    executable = f"{OPENROUTER_APP}/Contents/MacOS/ChatGPT"
+    matches = []
+    for line in process_table.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2:
+            continue
+        command = fields[1]
+        if command == executable or command.startswith(executable + " "):
+            matches.append(line)
+    return matches
+
+
 def check_runtime(doctor: Doctor, adapter: dict) -> None:
     result = subprocess.run(
         ["/bin/ps", "-axo", "pid=,command="],
@@ -456,7 +475,7 @@ def check_runtime(doctor: Doctor, adapter: dict) -> None:
     if result.returncode != 0:
         doctor.fail("process listを取得できません")
         return
-    clone = [line for line in result.stdout.splitlines() if f"{OPENROUTER_APP}/Contents/MacOS/ChatGPT" in line]
+    clone = openrouter_main_processes(result.stdout)
     doctor.expect(
         len(clone) == 1,
         "OpenRouter main processが1件起動しています",

@@ -1,12 +1,36 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
+from unittest import mock
+import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_doctor_template():
+    source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(
+        encoding="utf-8"
+    )
+    rendered = source.replace("@@PYTHON@@", "/usr/bin/python3").replace(
+        "@@USER_HOME@@", "/tmp/codex-openrouter-test-home"
+    )
+    temporary = tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False)
+    try:
+        temporary.write(rendered)
+        temporary.close()
+        spec = importlib.util.spec_from_file_location("tested_doctor", temporary.name)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        Path(temporary.name).unlink(missing_ok=True)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -54,6 +78,60 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('"X-Generation-Id"', source)
         self.assertIn('metadata.get("provider_name")', source)
         self.assertIn("/api/v1/endpoints/zdr", source)
+
+    def test_generation_metadata_retries_eventual_404(self) -> None:
+        doctor = load_doctor_template()
+        not_found = urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/generation?id=gen-test",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        with (
+            mock.patch.object(
+                doctor,
+                "authenticated_json",
+                side_effect=[not_found, not_found, {"data": {"provider_name": "Example"}}],
+            ) as request,
+            mock.patch.object(doctor.time, "sleep") as sleep,
+        ):
+            metadata = doctor.generation_metadata("secret", "gen-test")
+        self.assertEqual("Example", metadata["provider_name"])
+        self.assertEqual(3, request.call_count)
+        self.assertEqual([mock.call(2), mock.call(2)], sleep.call_args_list)
+
+    def test_generation_metadata_does_not_retry_non_404(self) -> None:
+        doctor = load_doctor_template()
+        unauthorized = urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/generation?id=gen-test",
+            401,
+            "Unauthorized",
+            {},
+            None,
+        )
+        with (
+            mock.patch.object(doctor, "authenticated_json", side_effect=unauthorized),
+            mock.patch.object(doctor.time, "sleep") as sleep,
+            self.assertRaises(urllib.error.HTTPError),
+        ):
+            doctor.generation_metadata("secret", "gen-test")
+        sleep.assert_not_called()
+
+    def test_runtime_process_match_excludes_wrapper_commands(self) -> None:
+        doctor = load_doctor_template()
+        executable = f"{doctor.OPENROUTER_APP}/Contents/MacOS/ChatGPT"
+        real = f"  123 {executable} --user-data-dir=/tmp/user-data"
+        wrapper = f"  456 /bin/zsh -lc echo {executable}"
+        self.assertEqual([real], doctor.openrouter_main_processes(f"{real}\n{wrapper}\n"))
+
+    def test_launcher_process_match_is_anchored_to_command_start(self) -> None:
+        source = (ROOT / "portable/templates/codex-openrouter-app.zsh.in").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("while read -r pid command_line", source)
+        self.assertIn('"$command_line" == "$EXECUTABLE"', source)
+        self.assertNotIn('"$line" == *"$EXECUTABLE"*', source)
 
 
 if __name__ == "__main__":
