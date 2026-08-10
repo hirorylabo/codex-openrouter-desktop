@@ -1,0 +1,19 @@
+model = "@@DEFAULT_MODEL@@"
+model_provider = "openrouter"
+@@REASONING_LINE@@
+model_catalog_json = "@@CODEX_HOME@@/model-catalogs/openrouter.json"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+supports_websockets = false
+
+[model_providers.openrouter.auth]
+command = "@@CREDENTIAL_HELPER@@"
+args = ["get"]
+timeout_ms = 10000
+refresh_interval_ms = 0
+
+[desktop]
+followUpQueueMode = "queue"

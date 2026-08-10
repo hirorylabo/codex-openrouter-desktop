@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "release": "v0.1.0",
+  "platform": "macOS-arm64",
+  "adapter_index": "adapters/index.json",
+  "model_registry": "models/registry.json",
+  "default_profile": "profiles/default.json",
+  "credential": {
+    "storage": "macOS Keychain",
+    "service": "io.github.hirorylabo.codex-openrouter-desktop",
+    "codex_auth": "command-backed"
+  },
+  "upstream_patcher": {
+    "repository": "https://github.com/Keksuccino/Better-Codex-App-Custom-Provider-Support.git",
+    "commit": "4e19e474330dc5266eb814e425410127aa7c1a4e",
+    "source_sha256": "ec63e9ba109ec171162c5bd846359ed727368eb3154b2cdeade123afeae3ffb4",
+    "source_url": "https://raw.githubusercontent.com/Keksuccino/Better-Codex-App-Custom-Provider-Support/4e19e474330dc5266eb814e425410127aa7c1a4e/patch_chatgpt_providers.py",
+    "license": "Unlicense",
+    "license_sha256": "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e",
+    "license_url": "https://raw.githubusercontent.com/Keksuccino/Better-Codex-App-Custom-Provider-Support/4e19e474330dc5266eb814e425410127aa7c1a4e/LICENSE"
+  }
+}

@@ -1,0 +1,771 @@
+#!@@PYTHON@@
+"""Build and atomically refresh the dedicated OpenRouter Codex model catalog."""
+
+from __future__ import annotations
+
+import argparse
+from copy import deepcopy
+from decimal import Decimal, InvalidOperation
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+
+OPENROUTER_HOME = Path(
+    os.environ.get("CODEX_OPENROUTER_HOME", "@@USER_HOME@@/.codex-openrouter")
+)
+OPENROUTER_APP = Path(
+    os.environ.get(
+        "CODEX_OPENROUTER_APP",
+        "@@USER_HOME@@/Applications/ChatGPT OpenRouter.app",
+    )
+)
+CATALOG = OPENROUTER_HOME / "model-catalogs/openrouter.json"
+REGISTRY = OPENROUTER_HOME / "registry.json"
+PROFILE = OPENROUTER_HOME / "profile.json"
+REFRESH_STATE = OPENROUTER_HOME / "price-refresh-state.json"
+CODEX = OPENROUTER_APP / "Contents/Resources/codex"
+PRICE_SCALE = Decimal(1_000_000)
+PRICE_NOTE = (
+    "価格は1M tokens当たりの更新時点の参考値。"
+    "ZDR最安値は各項目でproviderが異なる場合があり、"
+    "稼働率、routing、cache、割引後の実請求額を保証しません。"
+)
+
+def load_runtime_contract(
+    registry_path: Path = REGISTRY,
+    profile_path: Path = PROFILE,
+) -> tuple[dict, dict[str, dict], list[str]]:
+    registry_document = json.loads(registry_path.read_text(encoding="utf-8"))
+    profile_document = json.loads(profile_path.read_text(encoding="utf-8"))
+    registry = registry_document.get("models")
+    models = profile_document.get("models")
+    if registry_document.get("schema_version") != 1 or not isinstance(registry, dict):
+        raise ValueError("registry.json has an unsupported schema")
+    if profile_document.get("schema_version") != 1 or not isinstance(models, list):
+        raise ValueError("profile.json has an unsupported schema")
+    if not models or len(models) != len(set(models)) or not set(models).issubset(registry):
+        raise ValueError("profile model inventory is empty, duplicated, or unverified")
+    refresh = registry_document.get("price_refresh")
+    required_refresh_keys = {
+        "models_url",
+        "zdr_endpoints_url",
+        "success_ttl_seconds",
+        "failure_backoff_seconds",
+        "state_schema",
+        "state_results",
+        "components",
+    }
+    if not isinstance(refresh, dict) or not required_refresh_keys.issubset(refresh):
+        raise ValueError("registry.json has no complete price refresh contract")
+    for key in ("models_url", "zdr_endpoints_url"):
+        value = refresh[key]
+        if not isinstance(value, str) or not value.startswith("https://"):
+            raise ValueError(f"price refresh {key} must be an HTTPS URL")
+    for key in ("success_ttl_seconds", "failure_backoff_seconds"):
+        value = refresh[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"price refresh {key} must be a positive integer")
+    if refresh["state_schema"] != 1:
+        raise ValueError("price refresh state schema is unsupported")
+    state_results = refresh["state_results"]
+    if (
+        not isinstance(state_results, list)
+        or not state_results
+        or len(state_results) != len(set(state_results))
+        or not all(isinstance(result, str) and result for result in state_results)
+    ):
+        raise ValueError("price refresh state results are invalid")
+    components = refresh["components"]
+    if not isinstance(components, dict) or set(components) != {
+        "input",
+        "output",
+        "cache_read",
+    }:
+        raise ValueError("price refresh components are invalid")
+    for component in components.values():
+        if not isinstance(component, dict) or not all(
+            isinstance(component.get(key), str) and component[key]
+            for key in ("label", "api_key")
+        ):
+            raise ValueError("price refresh component metadata is invalid")
+    specs: dict[str, dict] = {}
+    for slug in models:
+        raw = registry[slug]
+        try:
+            headline = {
+                key: Decimal(str(raw["fallback_headline"][key]))
+                for key in components
+            }
+            zdr = {}
+            for key in components:
+                provider = str(raw["fallback_zdr"][key]["provider"]).strip()
+                if not provider or len(provider) > 100 or any(ord(char) < 32 for char in provider):
+                    raise ValueError("invalid fallback ZDR provider")
+                zdr[key] = (
+                    Decimal(str(raw["fallback_zdr"][key]["price"])),
+                    provider,
+                )
+        except (KeyError, TypeError, InvalidOperation) as exc:
+            raise ValueError(f"registry presentation metadata is invalid for {slug}") from exc
+        specs[slug] = {**raw, "fallback_headline": headline, "fallback_zdr": zdr}
+    return registry_document, specs, models
+
+
+REGISTRY_DATA, MODEL_SPECS, PROFILE_MODELS = load_runtime_contract()
+PRICE_REFRESH_CONTRACT = REGISTRY_DATA["price_refresh"]
+MODELS_URL = PRICE_REFRESH_CONTRACT["models_url"]
+ZDR_ENDPOINTS_URL = PRICE_REFRESH_CONTRACT["zdr_endpoints_url"]
+SUCCESS_TTL_SECONDS = PRICE_REFRESH_CONTRACT["success_ttl_seconds"]
+FAILURE_BACKOFF_SECONDS = PRICE_REFRESH_CONTRACT["failure_backoff_seconds"]
+REFRESH_STATE_SCHEMA = PRICE_REFRESH_CONTRACT["state_schema"]
+REFRESH_STATE_RESULTS = frozenset(PRICE_REFRESH_CONTRACT["state_results"])
+PRICE_COMPONENTS = {
+    key: (component["label"], component["api_key"])
+    for key, component in PRICE_REFRESH_CONTRACT["components"].items()
+}
+
+EFFORT_DESCRIPTIONS = {
+    "minimal": "Minimal reasoning for the fastest response",
+    "low": "Fast responses with lighter reasoning",
+    "medium": "Balanced reasoning depth",
+    "high": "Greater reasoning depth for complex coding tasks",
+    "xhigh": "Extra-high reasoning depth",
+    "max": "Maximum available reasoning depth",
+}
+
+
+class CatalogError(RuntimeError):
+    pass
+
+
+class RefreshUnavailableError(CatalogError):
+    """Transient lack of a complete active ZDR price set."""
+
+
+def decimal_label(value: Decimal) -> str:
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def display_name(slug: str) -> str:
+    return str(MODEL_SPECS[slug]["display_name"])
+
+
+def request_model_id(slug: str) -> str:
+    return slug
+
+
+def description(
+    slug: str,
+    spec: dict,
+    headline_prices: dict[str, Decimal],
+    zdr_prices: dict[str, tuple[Decimal, str]],
+) -> str:
+    headline = ", ".join(
+        f"{label} ${decimal_label(headline_prices[key])}/M"
+        for key, (label, _api_key) in PRICE_COMPONENTS.items()
+    )
+    zdr = ", ".join(
+        f"{label} ${decimal_label(zdr_prices[key][0])}/M ({zdr_prices[key][1]})"
+        for key, (label, _api_key) in PRICE_COMPONENTS.items()
+    )
+    return (
+        f"{spec['capability']} {spec['reasoning_note']} {slug} via OpenRouter "
+        f"({spec['canonical_slug']}). 通常headline: {headline}. "
+        f"ZDR稼働endpoint最安: {zdr}. {PRICE_NOTE}"
+    )
+
+
+def validate_price(label: str, raw_value: object) -> Decimal:
+    try:
+        value = Decimal(str(raw_value)) * PRICE_SCALE
+    except (InvalidOperation, ValueError) as exc:
+        raise CatalogError(f"Invalid OpenRouter {label} price: {raw_value}") from exc
+    if not (Decimal("0") <= value < Decimal("1000")):
+        raise CatalogError(f"{label} price out of range: {value}")
+    return value
+
+
+def validate_provider_name(raw_value: object) -> str:
+    provider = str(raw_value or "").strip()
+    if not provider or len(provider) > 100 or any(ord(char) < 32 for char in provider):
+        raise CatalogError(f"Invalid OpenRouter ZDR provider name: {raw_value!r}")
+    return provider
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def load_bundled_template() -> dict:
+    if not CODEX.is_file():
+        raise CatalogError(f"Bundled Codex CLI not found: {CODEX}")
+    result = subprocess.run(
+        [str(CODEX), "debug", "models", "--bundled"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    data = json.loads(result.stdout)
+    models = data.get("models")
+    if not isinstance(models, list):
+        raise CatalogError("Bundled catalog has no models array")
+    template = next((model for model in models if model.get("slug") == "gpt-5.5"), None)
+    if not isinstance(template, dict) or not template.get("base_instructions"):
+        raise CatalogError("Complete gpt-5.5 bundled descriptor was not found")
+    return template
+
+
+def build_initial_catalog() -> dict:
+    template = load_bundled_template()
+    models = []
+    for priority, (slug, spec) in enumerate(MODEL_SPECS.items(), start=100):
+        model = deepcopy(template)
+        model.update(
+            {
+                "slug": request_model_id(slug),
+                "display_name": display_name(slug),
+                "description": description(
+                    slug,
+                    spec,
+                    spec["fallback_headline"],
+                    spec["fallback_zdr"],
+                ),
+                "default_reasoning_level": spec["default_effort"],
+                "supported_reasoning_levels": [
+                    {
+                        "effort": effort,
+                        "description": EFFORT_DESCRIPTIONS[effort],
+                    }
+                    for effort in spec["efforts"]
+                ],
+                "visibility": "list",
+                "supported_in_api": True,
+                "priority": priority,
+                "additional_speed_tiers": [],
+                "service_tiers": [],
+                "availability_nux": None,
+                "upgrade": None,
+                "default_reasoning_summary": "none",
+                "support_verbosity": False,
+                "default_verbosity": "low",
+                "apply_patch_tool_type": "freeform",
+                "supports_parallel_tool_calls": spec["supports_parallel_tool_calls"],
+                "supports_image_detail_original": False,
+                "context_window": spec["context_window"],
+                "max_context_window": spec["context_window"],
+                "comp_hash": None,
+                "effective_context_window_percent": 95,
+                "experimental_supported_tools": [],
+                "input_modalities": spec["codex_modalities"],
+                "supports_search_tool": False,
+                "use_responses_lite": False,
+            }
+        )
+        models.append(model)
+    catalog = {"models": models}
+    validate_catalog(catalog)
+    return catalog
+
+
+def validate_catalog(
+    catalog: dict,
+    *,
+    allow_presentation_drift: bool = False,
+) -> list[dict]:
+    models = catalog.get("models")
+    if not isinstance(models, list) or len(models) != len(MODEL_SPECS):
+        raise CatalogError(f"Catalog must contain exactly {len(MODEL_SPECS)} models")
+    slugs = [model.get("slug") for model in models if isinstance(model, dict)]
+    expected_slugs = {request_model_id(slug) for slug in MODEL_SPECS}
+    if len(slugs) != len(models) or set(slugs) != expected_slugs:
+        raise CatalogError("Catalog model IDs do not exactly match the pinned model set")
+    required = {
+        "slug",
+        "display_name",
+        "description",
+        "base_instructions",
+        "supported_reasoning_levels",
+        "context_window",
+        "input_modalities",
+    }
+    for model in models:
+        missing = required - set(model)
+        if missing or not model.get("base_instructions"):
+            raise CatalogError(
+                f"Incomplete model descriptor for {model.get('slug')}: {sorted(missing)}"
+            )
+        slug = model["slug"]
+        spec = MODEL_SPECS[slug]
+        efforts = [
+            level.get("effort")
+            for level in model.get("supported_reasoning_levels", [])
+            if isinstance(level, dict)
+        ]
+        expected = {
+            "default_reasoning_level": spec["default_effort"],
+            "context_window": spec["context_window"],
+            "max_context_window": spec["context_window"],
+            "input_modalities": spec["codex_modalities"],
+            "supports_parallel_tool_calls": spec["supports_parallel_tool_calls"],
+        }
+        mismatches = {
+            key: (model.get(key), value)
+            for key, value in expected.items()
+            if model.get(key) != value
+        }
+        if efforts != spec["efforts"]:
+            mismatches["supported_reasoning_levels"] = (efforts, spec["efforts"])
+        if not allow_presentation_drift:
+            if model.get("display_name") != spec["display_name"]:
+                mismatches["display_name"] = (
+                    model.get("display_name"),
+                    spec["display_name"],
+                )
+            if any(
+                token in str(model.get("display_name", ""))
+                for token in ("IN", "OUT", "$", "/M")
+            ):
+                mismatches["display_name_price"] = model.get("display_name")
+            description_text = str(model.get("description", ""))
+            if not all(
+                marker in description_text
+                for marker in ("通常headline:", "ZDR稼働endpoint最安:", PRICE_NOTE)
+            ):
+                mismatches["description_prices"] = "missing dual-price markers"
+        if mismatches:
+            raise CatalogError(f"Descriptor contract mismatch for {slug}: {mismatches}")
+        if "@preset" in slug or "qwen" in slug.lower():
+            raise CatalogError(f"Disallowed catalog model ID: {slug}")
+    return models
+
+
+def validate_live_metadata(slug: str, item: dict) -> None:
+    spec = MODEL_SPECS[slug]
+    if item.get("canonical_slug") != spec["canonical_slug"]:
+        raise CatalogError(
+            f"Canonical slug changed for {slug}: {item.get('canonical_slug')}"
+        )
+    if item.get("context_length") != spec["context_window"]:
+        raise CatalogError(
+            f"Context window changed for {slug}: {item.get('context_length')}"
+        )
+    architecture = item.get("architecture")
+    if not isinstance(architecture, dict) or architecture.get("input_modalities") != spec["openrouter_modalities"]:
+        raise CatalogError(f"Input modalities changed for {slug}")
+    parameters = item.get("supported_parameters")
+    if not isinstance(parameters, list) or not {"reasoning", "tools", "tool_choice"}.issubset(parameters):
+        raise CatalogError(f"Required OpenRouter parameters are missing for {slug}")
+    reasoning = item.get("reasoning")
+    if not isinstance(reasoning, dict):
+        raise CatalogError(f"Reasoning metadata is missing for {slug}")
+    live_efforts = reasoning.get("supported_efforts")
+    live_default = reasoning.get("default_effort")
+    if spec["efforts"]:
+        if set(live_efforts or []) != set(spec["efforts"]):
+            raise CatalogError(f"Reasoning efforts changed for {slug}: {live_efforts}")
+        if live_default != spec["default_effort"]:
+            raise CatalogError(f"Reasoning default changed for {slug}: {live_default}")
+        if "reasoning_effort" not in parameters:
+            raise CatalogError(f"reasoning_effort support disappeared for {slug}")
+    else:
+        if live_efforts not in (None, []) or live_default is not None:
+            raise CatalogError(
+                f"OpenRouter now publishes effort controls for {slug}; review required"
+            )
+        if "reasoning_effort" in parameters:
+            raise CatalogError(
+                f"OpenRouter now advertises reasoning_effort for {slug}; review required"
+            )
+    if ("parallel_tool_calls" in parameters) != spec["supports_parallel_tool_calls"]:
+        raise CatalogError(f"Parallel tool-call capability changed for {slug}")
+
+
+def fetch_json(url: str) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "codex-openrouter-refresh/2"},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise CatalogError(f"OpenRouter API returned a non-object payload: {url}")
+    return payload
+
+
+def parse_headline_metadata(payload: dict) -> dict[str, dict[str, Decimal]]:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise CatalogError("OpenRouter Models API returned no data array")
+    by_id = {item.get("id"): item for item in data if isinstance(item, dict)}
+    prices: dict[str, dict[str, Decimal]] = {}
+    for slug in MODEL_SPECS:
+        item = by_id.get(slug)
+        if not isinstance(item, dict):
+            raise CatalogError(f"OpenRouter Models API is missing {slug}")
+        validate_live_metadata(slug, item)
+        pricing = item.get("pricing")
+        if not isinstance(pricing, dict):
+            raise CatalogError(f"OpenRouter headline pricing is missing for {slug}")
+        prices[slug] = {
+            key: validate_price(f"headline {label} for {slug}", pricing.get(api_key))
+            for key, (label, api_key) in PRICE_COMPONENTS.items()
+        }
+    return prices
+
+
+def parse_zdr_metadata(
+    payload: dict,
+) -> dict[str, dict[str, tuple[Decimal, str]]]:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise CatalogError("OpenRouter ZDR endpoints API returned no data array")
+    prices: dict[str, dict[str, tuple[Decimal, str]]] = {}
+    for slug in MODEL_SPECS:
+        active = [
+            item
+            for item in data
+            if isinstance(item, dict)
+            and item.get("model_id") == slug
+            and item.get("status") == 0
+        ]
+        if not active:
+            raise RefreshUnavailableError(
+                f"No active ZDR endpoint is available for {slug}"
+            )
+        component_prices: dict[str, tuple[Decimal, str]] = {}
+        for key, (label, api_key) in PRICE_COMPONENTS.items():
+            candidates: list[tuple[Decimal, str]] = []
+            for endpoint in active:
+                pricing = endpoint.get("pricing")
+                if not isinstance(pricing, dict) or api_key not in pricing:
+                    continue
+                provider = validate_provider_name(endpoint.get("provider_name"))
+                price = validate_price(f"ZDR {label} for {slug}", pricing[api_key])
+                candidates.append((price, provider))
+            if not candidates:
+                raise RefreshUnavailableError(
+                    f"No active ZDR {label} price is available for {slug}"
+                )
+            component_prices[key] = min(candidates, key=lambda item: (item[0], item[1]))
+        prices[slug] = component_prices
+    return prices
+
+
+def fetch_price_metadata() -> dict[str, dict]:
+    return {
+        "headline": parse_headline_metadata(fetch_json(MODELS_URL)),
+        "zdr": parse_zdr_metadata(fetch_json(ZDR_ENDPOINTS_URL)),
+    }
+
+
+def update_catalog_prices(
+    catalog: dict,
+    prices: dict[str, dict],
+) -> dict:
+    validate_catalog(catalog, allow_presentation_drift=True)
+    headline = prices.get("headline")
+    zdr = prices.get("zdr")
+    if not isinstance(headline, dict) or not isinstance(zdr, dict):
+        raise CatalogError("Combined headline/ZDR price metadata is incomplete")
+    if set(headline) != set(MODEL_SPECS) or set(zdr) != set(MODEL_SPECS):
+        raise CatalogError("Combined price metadata does not cover every approved model")
+    updated = deepcopy(catalog)
+    updated_models = {model["slug"]: model for model in updated["models"]}
+    for slug in MODEL_SPECS:
+        model = updated_models[request_model_id(slug)]
+        model["display_name"] = display_name(slug)
+        model["description"] = description(
+            slug,
+            MODEL_SPECS[slug],
+            headline[slug],
+            zdr[slug],
+        )
+    validate_catalog(updated)
+    return updated
+
+
+def fallback_price_metadata() -> dict[str, dict]:
+    return {
+        "headline": {
+            slug: dict(spec["fallback_headline"])
+            for slug, spec in MODEL_SPECS.items()
+        },
+        "zdr": {
+            slug: dict(spec["fallback_zdr"])
+            for slug, spec in MODEL_SPECS.items()
+        },
+    }
+
+
+def load_refresh_state(path: Path = REFRESH_STATE) -> dict:
+    if not path.exists():
+        return {}
+    metadata = path.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise CatalogError("price refresh state must be a current-user regular file mode 600")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or state.get("schema") != REFRESH_STATE_SCHEMA:
+        raise CatalogError("price refresh state has an unsupported schema")
+    for key in ("last_attempt_epoch", "last_success_epoch"):
+        value = state.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+        ):
+            raise CatalogError(f"price refresh state has an invalid {key}")
+    result = state.get("last_result")
+    if result not in REFRESH_STATE_RESULTS:
+        raise CatalogError("price refresh state has an invalid last_result")
+    return state
+
+
+def read_refresh_state(path: Path = REFRESH_STATE) -> tuple[dict, str]:
+    try:
+        state = load_refresh_state(path)
+    except (CatalogError, OSError, json.JSONDecodeError) as exc:
+        return {}, f"state invalid: {exc}"
+    if not state:
+        return {}, "state missing"
+    return state, "state valid"
+
+
+def write_refresh_state(
+    path: Path,
+    previous: dict,
+    now: float,
+    result: str,
+    *,
+    success: bool = False,
+) -> dict:
+    state = {
+        "schema": REFRESH_STATE_SCHEMA,
+        "last_attempt_epoch": int(now),
+        "last_result": result,
+    }
+    previous_success = previous.get("last_success_epoch")
+    if isinstance(previous_success, (int, float)) and not isinstance(previous_success, bool):
+        state["last_success_epoch"] = int(previous_success)
+    if success:
+        state["last_success_epoch"] = int(now)
+    try:
+        atomic_write_json(path, state)
+    except OSError as exc:
+        raise CatalogError(f"Cannot write price refresh state: {exc}") from exc
+    return state
+
+
+def refresh_decision(
+    path: Path = REFRESH_STATE,
+    now: float | None = None,
+) -> tuple[bool, str]:
+    current = time.time() if now is None else now
+    state, state_note = read_refresh_state(path)
+    if not state:
+        return True, state_note
+    last_success = state.get("last_success_epoch")
+    last_attempt = state.get("last_attempt_epoch")
+    for label, value in (("success", last_success), ("attempt", last_attempt)):
+        if isinstance(value, (int, float)) and value > current:
+            return True, f"{label} timestamp is in the future"
+    if isinstance(last_success, (int, float)) and current - last_success < SUCCESS_TTL_SECONDS:
+        return False, "last successful refresh is less than 24 hours old"
+    if (
+        state.get("last_result")
+        in {"attempt", "network-error", "availability-error", "contract-error"}
+        and isinstance(last_attempt, (int, float))
+        and current - last_attempt < FAILURE_BACKOFF_SECONDS
+    ):
+        return False, "network retry backoff is active"
+    return True, "last successful refresh is stale"
+
+
+def refresh_catalog(
+    catalog: dict,
+    catalog_path: Path,
+    state_path: Path,
+    now: float,
+    fetcher=fetch_price_metadata,
+) -> dict[str, dict]:
+    previous, _state_note = read_refresh_state(state_path)
+    attempt_state = write_refresh_state(state_path, previous, now, "attempt")
+    try:
+        prices = fetcher()
+        updated = update_catalog_prices(catalog, prices)
+    except RefreshUnavailableError:
+        write_refresh_state(state_path, attempt_state, now, "availability-error")
+        raise
+    except CatalogError:
+        write_refresh_state(state_path, attempt_state, now, "contract-error")
+        raise
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        write_refresh_state(state_path, attempt_state, now, "network-error")
+        raise
+    try:
+        atomic_write_json(catalog_path, updated)
+    except OSError as exc:
+        write_refresh_state(state_path, attempt_state, now, "contract-error")
+        raise CatalogError(f"Cannot atomically write the model catalog: {exc}") from exc
+    write_refresh_state(state_path, attempt_state, now, "success", success=True)
+    return prices
+
+
+def price_summary(slug: str, prices: dict[str, dict]) -> str:
+    headline = prices["headline"][slug]
+    zdr = prices["zdr"][slug]
+    return (
+        f"{display_name(slug)}: headline IN ${decimal_label(headline['input'])}/M, "
+        f"OUT ${decimal_label(headline['output'])}/M; "
+        f"ZDR floor IN ${decimal_label(zdr['input'][0])}/M ({zdr['input'][1]}), "
+        f"OUT ${decimal_label(zdr['output'][0])}/M ({zdr['output'][1]})"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--catalog",
+        default=str(CATALOG),
+        help="Catalog path (default: dedicated live catalog)",
+    )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Generate complete descriptors from the bundled catalog first",
+    )
+    parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Only generate/validate the local fallback catalog",
+    )
+    parser.add_argument(
+        "--if-stale",
+        action="store_true",
+        help="Refresh only when the last success is at least 24 hours old",
+    )
+    parser.add_argument(
+        "--state",
+        default=str(REFRESH_STATE),
+        help="Refresh state path (default: dedicated live state)",
+    )
+    parser.add_argument(
+        "--migrate-presentation",
+        action="store_true",
+        help="Rewrite legacy labels/descriptions from reviewed fallback metadata without network access",
+    )
+    args = parser.parse_args()
+    catalog_path = Path(args.catalog).expanduser().resolve()
+    state_path = Path(args.state).expanduser().resolve()
+
+    if args.init and args.migrate_presentation:
+        raise CatalogError("--init and --migrate-presentation cannot be combined")
+
+    if args.init:
+        catalog = build_initial_catalog()
+        atomic_write_json(catalog_path, catalog)
+        print(f"Initialized complete OpenRouter catalog: {catalog_path}")
+    else:
+        if not catalog_path.is_file():
+            raise CatalogError(f"Catalog is missing; run with --init: {catalog_path}")
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        validate_catalog(
+            catalog,
+            allow_presentation_drift=not args.no_network or args.migrate_presentation,
+        )
+
+    if args.migrate_presentation:
+        migrated = update_catalog_prices(catalog, fallback_price_metadata())
+        atomic_write_json(catalog_path, migrated)
+        print(f"Migrated model presentation without network access: {catalog_path}")
+        return 0
+
+    if args.no_network:
+        print("Catalog validated without a network refresh")
+        return 0
+
+    if args.if_stale and not args.init:
+        should_refresh, reason = refresh_decision(state_path)
+        if not should_refresh:
+            print(f"Price refresh skipped: {reason}")
+            return 0
+        print(f"Price refresh required: {reason}")
+
+    try:
+        prices = refresh_catalog(
+            catalog,
+            catalog_path,
+            state_path,
+            time.time(),
+        )
+    except RefreshUnavailableError as exc:
+        if args.init:
+            print(
+                f"WARNING: active ZDR price set is incomplete; initialized fallback remains intact: {exc}",
+                file=sys.stderr,
+            )
+            return 0
+        print(
+            f"WARNING: active ZDR price set is incomplete; existing catalog remains intact: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    except CatalogError:
+        raise
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        if args.init:
+            print(
+                f"WARNING: live price refresh failed; initialized fallback remains intact: {exc}",
+                file=sys.stderr,
+            )
+            return 0
+        print(
+            f"WARNING: price refresh failed; existing catalog remains intact: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    for slug in MODEL_SPECS:
+        print(price_summary(slug, prices))
+    print(f"Atomically refreshed: {catalog_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (CatalogError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)

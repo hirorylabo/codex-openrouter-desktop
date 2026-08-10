@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "adapters": [
+    {
+      "id": "chatgpt-26.803.41515-build-6321",
+      "chatgpt_version": "26.803.41515",
+      "chatgpt_build": "6321",
+      "stock_asar_sha256": "5f6e773aafd542d3cf09e10b5dca6cabd301d0a155f4b8ce870e3915fc3da25e",
+      "patched_asar_sha256": "994c852acf66b51bdd826457e5fafcde9827ddc7db9f9a92518b77e6f235949d",
+      "patch_strategy": "exact",
+      "patcher": "portable/patcher/patch_build_6321.py",
+      "marker": "__codexOpenRouterBuild6321PatchV1"
+    }
+  ]
+}

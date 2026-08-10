@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Python tests
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
+      - name: Python syntax
+        run: python3 -m compileall -q src portable scripts
+      - name: Semantic patcher tests
+        working-directory: portable/patcher-js
+        run: npm ci --ignore-scripts && npm test
+      - name: Tree and history secret scan
+        run: python3 scripts/secret_scan.py --tree . --git-history
+      - name: Pinned source and license audit
+        run: python3 scripts/audit_upstream.py
+      - name: Build and scan release archive
+        run: |
+          python3 scripts/build_release.py v0.1.0
+          python3 scripts/secret_scan.py --tree . --archive dist/codex-openrouter-desktop-v0.1.0.tar.gz
+          cd dist && sha256sum -c SHA256SUMS
+
+  macos-compile:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Compile Keychain helper and Desktop launcher
+        run: |
+          xcrun swiftc portable/credential/CredentialHelper.swift -o /tmp/codex-openrouter-credential
+          xcrun swiftc portable/launcher/CodexOpenRouterLauncher.swift -o /tmp/CodexOpenRouterLauncher
+      - name: Parse zsh entry points
+        run: |
+          zsh -n portable/install.sh
+          zsh -n portable/templates/codex-openrouter-app.zsh.in
+          zsh -n portable/templates/codex-openrouter-rebuild.zsh.in

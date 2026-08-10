@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "negative_model": "qwen/qwen3.8-max",
+  "price_refresh": {
+    "models_url": "https://openrouter.ai/api/v1/models",
+    "zdr_endpoints_url": "https://openrouter.ai/api/v1/endpoints/zdr",
+    "success_ttl_seconds": 86400,
+    "failure_backoff_seconds": 3600,
+    "state_schema": 1,
+    "state_results": [
+      "attempt",
+      "success",
+      "network-error",
+      "availability-error",
+      "contract-error"
+    ],
+    "components": {
+      "input": {"label": "IN", "api_key": "prompt"},
+      "output": {"label": "OUT", "api_key": "completion"},
+      "cache_read": {"label": "CACHE_READ", "api_key": "input_cache_read"}
+    }
+  },
+  "models": {
+    "deepseek/deepseek-v4-flash-0731": {
+      "display_name": "DeepSeek V4 Flash 0731",
+      "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+      "context_window": 1048576,
+      "openrouter_modalities": ["text"],
+      "codex_modalities": ["text"],
+      "efforts": ["low", "high", "max"],
+      "default_effort": "high",
+      "supports_parallel_tool_calls": false,
+      "capability": "高速な長文coding、agentic tool use、反復的な実装・検証向け。",
+      "reasoning_note": "Reasoningはlow/high/max、既定high。",
+      "fallback_headline": {"input": "0.09", "output": "0.18", "cache_read": "0.018"},
+      "fallback_zdr": {
+        "input": {"price": "0.079996", "provider": "DigitalOcean"},
+        "output": {"price": "0.18", "provider": "DeepInfra"},
+        "cache_read": {"price": "0.018", "provider": "DeepInfra"}
+      }
+    },
+    "deepseek/deepseek-v4-pro": {
+      "display_name": "DeepSeek V4 Pro",
+      "canonical_slug": "deepseek/deepseek-v4-pro-20260423",
+      "context_window": 1048576,
+      "openrouter_modalities": ["text"],
+      "codex_modalities": ["text"],
+      "efforts": ["high", "xhigh"],
+      "default_effort": "high",
+      "supports_parallel_tool_calls": false,
+      "capability": "品質優先の複雑なcoding、設計、長時間agentic workflow向け。",
+      "reasoning_note": "Reasoningはhigh/xhigh、既定high。",
+      "fallback_headline": {"input": "0.435", "output": "0.87", "cache_read": "0.003625"},
+      "fallback_zdr": {
+        "input": {"price": "0.59952", "provider": "Novita"},
+        "output": {"price": "1.19904", "provider": "Novita"},
+        "cache_read": {"price": "0.0505845", "provider": "Novita"}
+      }
+    },
+    "moonshotai/kimi-k3": {
+      "display_name": "Kimi K3",
+      "canonical_slug": "moonshotai/kimi-k3-20260715",
+      "context_window": 1048576,
+      "openrouter_modalities": ["text", "image"],
+      "codex_modalities": ["text", "image"],
+      "efforts": ["low", "high", "max"],
+      "default_effort": "max",
+      "supports_parallel_tool_calls": false,
+      "capability": "大規模repo、画像を含むdebug、長時間のtool-driven coding向け。",
+      "reasoning_note": "Reasoningはlow/high/max、OpenRouter既定max。",
+      "fallback_headline": {"input": "3", "output": "15", "cache_read": "0.3"},
+      "fallback_zdr": {
+        "input": {"price": "2.8", "provider": "Morph"},
+        "output": {"price": "14", "provider": "Morph"},
+        "cache_read": {"price": "0.285", "provider": "DigitalOcean"}
+      }
+    },
+    "z-ai/glm-5.2": {
+      "display_name": "GLM 5.2",
+      "canonical_slug": "z-ai/glm-5.2-20260616",
+      "context_window": 1048576,
+      "openrouter_modalities": ["text"],
+      "codex_modalities": ["text"],
+      "efforts": ["high", "xhigh"],
+      "default_effort": "high",
+      "supports_parallel_tool_calls": true,
+      "capability": "project-level software engineering、長時間agent、複雑な自動化向け。",
+      "reasoning_note": "Reasoningはhigh/xhigh、既定high。xhighはOpenRouterでmaxへ変換。",
+      "fallback_headline": {"input": "0.07", "output": "0.22", "cache_read": "0.013"},
+      "fallback_zdr": {
+        "input": {"price": "0.0812", "provider": "Novita"},
+        "output": {"price": "0.2552", "provider": "Novita"},
+        "cache_read": {"price": "0.01508", "provider": "Novita"}
+      }
+    },
+    "minimax/minimax-m3": {
+      "display_name": "MiniMax M3",
+      "canonical_slug": "minimax/minimax-m3-20260531",
+      "context_window": 1048576,
+      "openrouter_modalities": ["text", "image", "video"],
+      "codex_modalities": ["text", "image"],
+      "efforts": [],
+      "default_effort": null,
+      "supports_parallel_tool_calls": false,
+      "capability": "1M長文、multimodal、長時間のcoding・tool use向け。Codex Desktopではtext/image入力を公開。",
+      "reasoning_note": "Reasoningはprovider-controlled。OpenRouterがeffort段階を公開していないためUI選択なし。",
+      "fallback_headline": {"input": "0.3", "output": "1.2", "cache_read": "0.06"},
+      "fallback_zdr": {
+        "input": {"price": "0.28", "provider": "DeepInfra"},
+        "output": {"price": "1.1", "provider": "DeepInfra"},
+        "cache_read": {"price": "0.056", "provider": "DeepInfra"}
+      }
+    }
+  }
+}

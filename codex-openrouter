@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Repository and installed entry point for Codex OpenRouter Desktop."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+
+def source_root() -> Path:
+    adjacent = Path(__file__).resolve().parent
+    if (adjacent / "src/codex_openrouter").is_dir():
+        return adjacent
+    installed = Path.home() / ".local/share/codex-openrouter-desktop/current"
+    if (installed / "src/codex_openrouter").is_dir():
+        return installed
+    raise SystemExit("codex-openrouter: runtime source treeが見つかりません")
+
+
+ROOT = source_root()
+os.environ["CODEX_OPENROUTER_SOURCE_ROOT"] = str(ROOT)
+sys.path.insert(0, str(ROOT / "src"))
+
+from codex_openrouter.cli import main
+
+
+raise SystemExit(main())

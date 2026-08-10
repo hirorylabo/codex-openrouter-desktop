@@ -1,0 +1,23 @@
+name: Feature request
+description: 対応範囲を広げる提案
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Minimal proposal
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification and security impact
+    validations:
+      required: true

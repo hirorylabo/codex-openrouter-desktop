@@ -1,0 +1,14 @@
+{
+  "name": "codex-openrouter-semantic-patcher",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "acorn": "8.15.0",
+    "acorn-walk": "8.3.4",
+    "magic-string": "0.30.17"
+  }
+}

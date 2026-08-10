@@ -1,0 +1,42 @@
+# macOS and generated caches
+.DS_Store
+**/.DS_Store
+__pycache__/
+**/__pycache__/
+**/node_modules/
+*.py[cod]
+
+# Runtime state and secrets: never commit
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+*.env
+.env.*
+installation_id
+.sandbox_migration
+**/auth.json
+**/cookies*
+**/Cookies*
+**/userData/**
+**/electron-user-data/**
+
+# Local evidence, backups, generated staging, and binaries
+backups/
+incident-evidence-*/
+staging/
+staging-*/
+runtime-*.png
+*.app/
+*.asar
+*.dmg
+*.pkg
+*.zip
+list_window
+CodexOpenRouterLauncher
+
+# Installer test output
+portable/.generated/
+portable/.test-output/
+dist/
