@@ -11,6 +11,7 @@ from pathlib import Path
 import plistlib
 import stat
 import subprocess
+import sys
 import time
 import tomllib
 import urllib.error
@@ -19,12 +20,24 @@ import urllib.request
 
 
 USER_HOME = Path("@@USER_HOME@@")
+SUPPORT_ROOT = Path(
+    os.environ.get(
+        "CODEX_OPENROUTER_SUPPORT_ROOT",
+        USER_HOME / ".local/share/codex-openrouter-desktop/current",
+    )
+)
+sys.path.insert(0, str(SUPPORT_ROOT / "src"))
+
+from codex_openrouter.processes import matching_processes
+
 STOCK_APP = Path("/Applications/ChatGPT.app")
 STOCK_HOME = USER_HOME / ".codex"
 OPENROUTER_APP = Path(os.environ.get("CODEX_OPENROUTER_APP", USER_HOME / "Applications/ChatGPT OpenRouter.app"))
 OPENROUTER_HOME = Path(os.environ.get("CODEX_OPENROUTER_HOME", USER_HOME / ".codex-openrouter"))
+RUNTIME_HOME = Path(os.environ.get("CODEX_OPENROUTER_RUNTIME_HOME", OPENROUTER_HOME))
 CONFIG = OPENROUTER_HOME / "config.toml"
 CATALOG = OPENROUTER_HOME / "model-catalogs/openrouter.json"
+RUNTIME_CATALOG = RUNTIME_HOME / "model-catalogs/openrouter.json"
 DESKTOP_PROVIDERS = OPENROUTER_HOME / "desktop-model-providers.json"
 PROFILE_PATH = OPENROUTER_HOME / "profile.json"
 REGISTRY_PATH = OPENROUTER_HOME / "registry.json"
@@ -213,7 +226,7 @@ def check_config_and_catalog(
         selected == profile.get("default_model")
         and config.get("model_provider") == "openrouter"
         and effort_ok
-        and config.get("model_catalog_json") == str(CATALOG),
+        and config.get("model_catalog_json") == str(RUNTIME_CATALOG),
         "configはprofileの既定モデルとOpenRouter providerを選択しています",
         "configのmodel/provider/reasoning/catalog契約が不正です",
     )
@@ -321,12 +334,21 @@ def check_app_server(doctor: Doctor, expected_models: tuple[str, ...]) -> None:
     )
 
 
-def request_model(key: str, model: str, effort: str | None) -> tuple[int, dict, str | None]:
+def request_model(
+    key: str,
+    model: str,
+    effort: str | None,
+    provider_tags: list[str] | None = None,
+) -> tuple[int, dict, str | None]:
+    provider: dict[str, object] = {"zdr": True}
+    if provider_tags:
+        provider["order"] = provider_tags
+        provider["allow_fallbacks"] = False
     body = {
         "model": model,
         "input": "Return exactly OK.",
         "max_output_tokens": 64,
-        "provider": {"zdr": True},
+        "provider": provider,
     }
     if effort is not None:
         body["reasoning"] = {"effort": effort}
@@ -388,16 +410,25 @@ def check_network(doctor: Doctor, registry: dict, expected_models: tuple[str, ..
         zdr_data = authenticated_json(
             "https://openrouter.ai/api/v1/endpoints/zdr", key
         ).get("data", [])
-        zdr_providers = {
-            model: {
-                endpoint.get("provider_name")
+        active_zdr_endpoints = {
+            model: [
+                endpoint
                 for endpoint in zdr_data
                 if isinstance(endpoint, dict)
                 and endpoint.get("model_id") == model
                 and endpoint.get("status") == 0
                 and isinstance(endpoint.get("provider_name"), str)
-            }
+                and isinstance(endpoint.get("tag"), str)
+            ]
             for model in expected_models
+        }
+        zdr_providers = {
+            model: {endpoint["provider_name"] for endpoint in endpoints}
+            for model, endpoints in active_zdr_endpoints.items()
+        }
+        zdr_tags = {
+            model: sorted({endpoint["tag"] for endpoint in endpoints})
+            for model, endpoints in active_zdr_endpoints.items()
         }
         model_ids = {
             item.get("id")
@@ -417,9 +448,14 @@ def check_network(doctor: Doctor, registry: dict, expected_models: tuple[str, ..
             f"OpenRouter keyの実効model集合が不正です: {sorted(concrete)}",
         )
         for model in expected_models:
+            if not zdr_tags.get(model):
+                doctor.fail(f"active ZDR endpointがありません: {model}")
+                continue
             efforts = registry[model].get("efforts") or [None]
             for effort in efforts:
-                status, body, generation_id = request_model(key, model, effort)
+                status, body, generation_id = request_model(
+                    key, model, effort, zdr_tags[model]
+                )
                 actual_model = body.get("model")
                 metadata = (
                     generation_metadata(key, generation_id)
@@ -433,7 +469,13 @@ def check_network(doctor: Doctor, registry: dict, expected_models: tuple[str, ..
                     and isinstance(actual_provider, str)
                     and actual_provider in zdr_providers.get(model, set()),
                     f"ZDR canaryは{model} ({effort or 'provider-controlled'})を実providerで完了しました",
-                    f"ZDR canary失敗: {model} ({effort or 'provider-controlled'}, HTTP {status})",
+                    (
+                        f"ZDR canary失敗: {model} "
+                        f"({effort or 'provider-controlled'}, HTTP {status}, "
+                        f"actual_model={actual_model!r}, "
+                        f"actual_provider={actual_provider!r}, "
+                        f"active_zdr_providers={sorted(zdr_providers.get(model, set()))})"
+                    ),
                 )
         negative_model = str(load_json(REGISTRY_PATH, doctor).get("negative_model", ""))
         status, negative_body, _generation_id = request_model(key, negative_model, None)
@@ -452,19 +494,6 @@ def check_network(doctor: Doctor, registry: dict, expected_models: tuple[str, ..
         doctor.fail(f"OpenRouter network canary失敗: {type(error).__name__}: {error}")
 
 
-def openrouter_main_processes(process_table: str) -> list[str]:
-    executable = f"{OPENROUTER_APP}/Contents/MacOS/ChatGPT"
-    matches = []
-    for line in process_table.splitlines():
-        fields = line.strip().split(maxsplit=1)
-        if len(fields) != 2:
-            continue
-        command = fields[1]
-        if command == executable or command.startswith(executable + " "):
-            matches.append(line)
-    return matches
-
-
 def check_runtime(doctor: Doctor, adapter: dict) -> None:
     result = subprocess.run(
         ["/bin/ps", "-axo", "pid=,command="],
@@ -475,7 +504,8 @@ def check_runtime(doctor: Doctor, adapter: dict) -> None:
     if result.returncode != 0:
         doctor.fail("process listを取得できません")
         return
-    clone = openrouter_main_processes(result.stdout)
+    executable = OPENROUTER_APP / "Contents/MacOS/ChatGPT"
+    clone = matching_processes(result.stdout, executable)
     doctor.expect(
         len(clone) == 1,
         "OpenRouter main processが1件起動しています",
@@ -487,7 +517,7 @@ def check_runtime(doctor: Doctor, adapter: dict) -> None:
         doctor.fail(str(error))
         return
     doctor.expect(
-        len(clone) == 1 and f"--user-data-dir={user_data}" in clone[0],
+        len(clone) == 1 and f"--user-data-dir={user_data}" in clone[0][1],
         "OpenRouter processは専用Electron userDataを使用しています",
         "OpenRouter processのElectron userDataが不正です",
     )

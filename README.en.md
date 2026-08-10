@@ -10,7 +10,7 @@ This CLI creates a dedicated local clone, `CODEX_HOME`, and Electron userData di
 ## Scope
 
 - Apple Silicon macOS only; no Windows, Linux, Intel Mac, or Homebrew support.
-- `v0.1.0` is a prerelease. The only known build is ChatGPT `26.803.41515` build `6321`.
+- `v0.1.1` is a prerelease. The only known build is ChatGPT `26.803.41515` build `6321`.
 - Unknown-build semantic candidates are best effort and never modify the stock app or promote without visual confirmation.
 - OpenRouter usage charges are the user's responsibility. Network doctor and candidate canaries may incur a small charge.
 
@@ -20,15 +20,15 @@ The project deliberately does not use `curl | bash`.
 
 ```bash
 mkdir codex-openrouter-download && cd codex-openrouter-download
-gh release download v0.1.0 --repo hirorylabo/codex-openrouter-desktop \
-  --pattern 'codex-openrouter-desktop-v0.1.0.tar.gz' \
-  --pattern 'codex-openrouter-desktop-v0.1.0.spdx.json' \
+gh release download v0.1.1 --repo hirorylabo/codex-openrouter-desktop \
+  --pattern 'codex-openrouter-desktop-v0.1.1.tar.gz' \
+  --pattern 'codex-openrouter-desktop-v0.1.1.spdx.json' \
   --pattern 'SHA256SUMS'
-gh attestation verify codex-openrouter-desktop-v0.1.0.tar.gz \
+gh attestation verify codex-openrouter-desktop-v0.1.1.tar.gz \
   --repo hirorylabo/codex-openrouter-desktop
 shasum -a 256 -c SHA256SUMS
-tar -xzf codex-openrouter-desktop-v0.1.0.tar.gz
-cd codex-openrouter-desktop-v0.1.0
+tar -xzf codex-openrouter-desktop-v0.1.1.tar.gz
+cd codex-openrouter-desktop-v0.1.1
 ```
 
 ## OpenRouter preparation
@@ -46,6 +46,8 @@ Install the official signed ChatGPT.app, Xcode Command Line Tools, Python 3.11+,
 
 OAuth uses PKCE S256 with a temporary random-port `127.0.0.1` callback. The API key is stored only in macOS Keychain under service `io.github.hirorylabo.codex-openrouter-desktop`. Codex obtains it through a credential helper; command-line key arguments, `.env`, shell profiles, configuration, and logs are not supported.
 
+When Finder's desktop stacks are enabled, the launcher appears inside the Applications stack. Turn off **Finder > View > Use Stacks** to keep it directly visible. Setup and upgrade regenerate its project icon, signature, and default workspace.
+
 ## Commands
 
 ```text
@@ -54,11 +56,14 @@ codex-openrouter setup [--workspace PATH] [--profile default|FILE] [--auth oauth
 codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter update
+codex-openrouter upgrade [--profile default|FILE]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
 
 Custom profiles may only select models already present in [`models/registry.json`](./models/registry.json). Before any application write, the CLI requires the API key's effective concrete model set to exactly match the profile.
+
+For a known build, `update` dispatches to `upgrade`. After downloading a newer release, close the dedicated app and run `./codex-openrouter upgrade`. It validates the runtime, configuration, and any new known adapter app in staging, switches each target transactionally, retains recoverable originals, and automatically rolls back every switched target if the post-switch doctor fails. A successful upgrade can also be reverted with `codex-openrouter rollback`. Rebuild resolves its patcher from an exact match between the active adapter and `adapters/index.json`.
 
 Unknown builds are patched only in an isolated candidate using three single-match semantic anchors. Signature, ASAR integrity, exact App Server model inventory, every published reasoning effort, request-level ZDR, and the actual ZDR provider are checked before visual confirmation. Promotion requires typing `PROMOTE`; a failed post-promotion doctor automatically restores the prior app and runtime configuration.
 

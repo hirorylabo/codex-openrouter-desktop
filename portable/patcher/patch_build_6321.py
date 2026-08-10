@@ -17,9 +17,6 @@ from pathlib import Path
 import sys
 
 
-EXPECTED_UPSTREAM_SHA256 = (
-    "ec63e9ba109ec171162c5bd846359ed727368eb3154b2cdeade123afeae3ffb4"
-)
 EXPECTED_VERSION = "26.803.41515"
 EXPECTED_BUILD = "6321"
 EXPECTED_UNPATCHED_ASAR_SHA256 = (
@@ -36,12 +33,12 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_upstream(path: Path):
+def load_upstream(path: Path, expected_sha256: str):
     actual = sha256(path)
-    if actual != EXPECTED_UPSTREAM_SHA256:
+    if actual != expected_sha256:
         raise RuntimeError(
             "Pinned upstream patcher hash mismatch: "
-            f"expected {EXPECTED_UPSTREAM_SHA256}, found {actual}"
+            f"expected {expected_sha256}, found {actual}"
         )
     spec = importlib.util.spec_from_file_location("pinned_better_codex_patcher", path)
     if spec is None or spec.loader is None:
@@ -133,13 +130,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--backup-dir", type=Path, required=True)
     parser.add_argument("--upstream", type=Path, required=True)
+    parser.add_argument("--upstream-sha256", required=True)
     parser.add_argument("--allow-running", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    module = load_upstream(args.upstream.resolve())
+    module = load_upstream(args.upstream.resolve(), args.upstream_sha256)
     app = args.app.expanduser().resolve()
     info_path = app / "Contents" / "Info.plist"
     asar_path = app / "Contents" / "Resources" / "app.asar"

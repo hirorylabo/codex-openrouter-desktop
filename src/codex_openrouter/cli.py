@@ -16,6 +16,7 @@ from .auth import (
     temporary_store,
 )
 from .openrouter import OpenRouterError, validate_key_and_profile
+from .processes import ProcessError, process_pids
 from .profile import ProfileError, ResolvedProfile, resolve_profile
 
 
@@ -102,7 +103,7 @@ def setup_command(args: argparse.Namespace) -> int:
     adapter = load_adapter(root() / "adapters/index.json", stock)
     if adapter is None:
         raise CliError(
-            "未知buildです。v0.1.0では先に既存installationからcodex-openrouter updateを実行し、candidateを目視承認してください"
+            "未知buildです。既存installationからcodex-openrouter updateを実行し、candidateを目視承認してください"
         )
     selected, profile = resolved_profile(args.profile, paths)
     store, temporary = credential_store(paths)
@@ -175,14 +176,44 @@ def rollback_command(_args: argparse.Namespace) -> int:
     paths = UserPaths.current()
     backup_root = paths.home / "Applications/ChatGPT OpenRouter Backups"
     backups = sorted(backup_root.glob("*.app"), key=lambda path: path.stat().st_mtime, reverse=True)
-    if not backups:
-        raise CliError(f"復元可能なbackup appがありません: {backup_root}")
+    upgrade_root = paths.codex_home / "upgrade-backups"
+    upgrade_backups = sorted(
+        (
+            path
+            for path in upgrade_root.glob("*")
+            if path.is_dir() and (path / "promotion.json").is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    latest_app_time = backups[0].stat().st_mtime if backups else -1
+    latest_upgrade_time = upgrade_backups[0].stat().st_mtime if upgrade_backups else -1
+    if not backups and not upgrade_backups:
+        raise CliError("復元可能なappまたはupgrade backupがありません")
     if paths.openrouter_app.exists():
-        active_process = subprocess.run(
-            ["/bin/ps", "-axo", "command="], text=True, stdout=subprocess.PIPE
-        ).stdout
-        if str(paths.openrouter_app / "Contents/MacOS/ChatGPT") in active_process:
+        if process_pids(paths.openrouter_app / "Contents/MacOS/ChatGPT"):
             raise CliError("専用appを通常終了してからrollbackしてください")
+    if latest_upgrade_time >= latest_app_time:
+        from .promotion import atomic_promote, rollback_replacements
+
+        source_backup = upgrade_backups[0]
+        confirmation = input(
+            f"{source_backup.name} のupgrade前状態へ戻します。ROLLBACKと入力して確認: "
+        )
+        if confirmation != "ROLLBACK":
+            raise CliError("rollbackを中止しました")
+        timestamp = subprocess.check_output(["/bin/date", "+%Y%m%d-%H%M%S"], text=True).strip()
+        rollback_backup = upgrade_root / f"manual-rollback-{timestamp}"
+
+        def verify() -> None:
+            result = subprocess.run([str(paths.bin_dir / "codex-openrouter-doctor")])
+            if result.returncode != 0:
+                raise CliError("復元後doctorに失敗しました")
+
+        atomic_promote(rollback_replacements(source_backup), rollback_backup, verify)
+        print(f"upgrade前状態を復元しました: {source_backup}")
+        print(f"rollback直前状態のbackup: {rollback_backup}")
+        return 0
     source = backups[0]
     metadata = None
     marker = "ChatGPT OpenRouter.pre-candidate-"
@@ -212,6 +243,12 @@ def update_command(args: argparse.Namespace) -> int:
     from .candidate import update
 
     return update(root(), UserPaths.current(), args.profile)
+
+
+def upgrade_command(args: argparse.Namespace) -> int:
+    from .upgrade import upgrade
+
+    return upgrade(root(), UserPaths.current(), args.profile)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -247,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--profile", default="default")
     update_parser.set_defaults(func=update_command)
 
+    upgrade_parser = subcommands.add_parser("upgrade")
+    upgrade_parser.add_argument("--profile", default="default")
+    upgrade_parser.set_defaults(func=upgrade_command)
+
     rollback = subcommands.add_parser("rollback")
     rollback.set_defaults(func=rollback_command)
 
@@ -262,9 +303,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .candidate import CandidateError
+    from .promotion import PromotionError
+    from .upgrade import UpgradeError
+
     try:
         args = build_parser().parse_args(argv)
         return int(args.func(args))
-    except (AppError, AuthenticationError, OpenRouterError, ProfileError, CliError, OSError, subprocess.SubprocessError) as error:
+    except (
+        AppError,
+        AuthenticationError,
+        CandidateError,
+        OpenRouterError,
+        ProfileError,
+        ProcessError,
+        PromotionError,
+        UpgradeError,
+        CliError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1

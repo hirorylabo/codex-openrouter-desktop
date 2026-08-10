@@ -23,6 +23,8 @@
   <string>CodexOpenRouterLauncher</string>
   <key>CFBundleIdentifier</key>
   <string>local.codex.openrouter.launcher</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -30,9 +32,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.1</string>
+  <string>0.0.0</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>0.0.0</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
   <key>LSUIElement</key>

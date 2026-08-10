@@ -31,8 +31,9 @@ jobs:
         run: python3 scripts/audit_upstream.py
       - name: Build and scan release archive
         run: |
-          python3 scripts/build_release.py v0.1.0
-          python3 scripts/secret_scan.py --tree . --archive dist/codex-openrouter-desktop-v0.1.0.tar.gz
+          release_version="v$(tr -d '\n' < VERSION)"
+          python3 scripts/build_release.py "$release_version"
+          python3 scripts/secret_scan.py --tree . --archive "dist/codex-openrouter-desktop-$release_version.tar.gz"
           cd dist && sha256sum -c SHA256SUMS
 
   macos-compile:
@@ -45,8 +46,13 @@ jobs:
         run: |
           xcrun swiftc portable/credential/CredentialHelper.swift -o /tmp/codex-openrouter-credential
           xcrun swiftc portable/launcher/CodexOpenRouterLauncher.swift -o /tmp/CodexOpenRouterLauncher
+          portable/launcher/build_icon.zsh portable/launcher/CreateLauncherIcon.swift /tmp/AppIcon.icns
+          test -s /tmp/AppIcon.icns
       - name: Parse zsh entry points
         run: |
           zsh -n portable/install.sh
           zsh -n portable/templates/codex-openrouter-app.zsh.in
           zsh -n portable/templates/codex-openrouter-rebuild.zsh.in
+          zsh -n portable/launcher/build_icon.zsh
+      - name: Synthetic upgrade, promotion, and rollback E2E
+        run: PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py

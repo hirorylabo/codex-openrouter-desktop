@@ -34,12 +34,16 @@ def main() -> int:
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--template", required=True, type=Path)
     parser.add_argument("--output-home", required=True, type=Path)
+    parser.add_argument("--runtime-home", type=Path)
     parser.add_argument("--credential-helper", required=True, type=Path)
     args = parser.parse_args()
 
     registry_path = args.registry.resolve()
     profile = resolve_profile(registry_path, args.profile.resolve())
     output_home = args.output_home.resolve()
+    runtime_home = (
+        args.runtime_home.resolve() if args.runtime_home is not None else output_home
+    )
     credential_helper = args.credential_helper.resolve()
     template = args.template.read_text(encoding="utf-8")
     reasoning_line = (
@@ -50,7 +54,7 @@ def main() -> int:
     rendered = (
         template.replace("@@DEFAULT_MODEL@@", profile.default_model)
         .replace("@@REASONING_LINE@@", reasoning_line)
-        .replace("@@CODEX_HOME@@", str(output_home))
+        .replace("@@CODEX_HOME@@", str(runtime_home))
         .replace("@@CREDENTIAL_HELPER@@", str(credential_helper))
     )
     if "@@" in rendered:

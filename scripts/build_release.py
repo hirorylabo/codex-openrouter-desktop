@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -18,6 +19,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
+    "VERSION",
     "codex-openrouter",
     "LICENSE",
     "README.md",
@@ -30,6 +32,16 @@ FILES = (
 )
 DIRECTORIES = ("adapters", "models", "portable", "profiles", "src", "tests", "scripts")
 EXCLUDED_PARTS = {"node_modules", "__pycache__", ".generated", ".test-output", "dist"}
+SEMVER_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def validate_release_version(version: str) -> str:
+    if not SEMVER_TAG.fullmatch(version):
+        raise RuntimeError("release version must be a canonical vX.Y.Z tag")
+    expected = "v" + (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    if version != expected:
+        raise RuntimeError(f"tag {version} does not match VERSION ({expected})")
+    return version
 
 
 def sha256(path: Path) -> str:
@@ -175,11 +187,10 @@ def build_sbom(source: Path, version: str, namespace_hash: str, epoch: int) -> d
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("version", help="v-prefixed release version, for example v0.1.0")
+    parser.add_argument("version", help="canonical v-prefixed release version")
     parser.add_argument("--dist", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
-    if args.version != "v0.1.0":
-        raise RuntimeError("v0.1.0 is the only release version supported by this source tree")
+    validate_release_version(args.version)
     dist = args.dist.resolve()
     dist.mkdir(parents=True, exist_ok=True)
     archive = dist / f"codex-openrouter-desktop-{args.version}.tar.gz"

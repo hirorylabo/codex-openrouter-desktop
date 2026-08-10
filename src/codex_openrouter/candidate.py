@@ -12,14 +12,11 @@ import tarfile
 import time
 
 from .app import UserPaths, detect_stock, load_adapter, sha256
+from . import __version__
 from .auth import CredentialStore
 from .openrouter import validate_key_and_profile
+from .processes import process_pids
 from .profile import resolve_profile
-
-
-UPSTREAM_COMMIT = "4e19e474330dc5266eb814e425410127aa7c1a4e"
-UPSTREAM_SOURCE_SHA256 = "ec63e9ba109ec171162c5bd846359ed727368eb3154b2cdeade123afeae3ffb4"
-UPSTREAM_LICENSE_SHA256 = "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e"
 
 
 class CandidateError(RuntimeError):
@@ -70,25 +67,8 @@ def command_environment(root: Path) -> dict[str, str]:
     environment.pop("OPENROUTER_API_KEY", None)
     environment.pop("CODEX_ACCESS_TOKEN", None)
     environment["PYTHONPATH"] = str(root / "src")
+    environment["CODEX_OPENROUTER_SUPPORT_ROOT"] = str(root)
     return environment
-
-
-def process_pids(executable: Path) -> list[int]:
-    result = subprocess.run(
-        ["/bin/ps", "-axo", "pid=,command="],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        raise CandidateError("process listを取得できません")
-    prefix = str(executable)
-    pids: list[int] = []
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) == 2 and fields[1].startswith(prefix):
-            pids.append(int(fields[0]))
-    return pids
 
 
 def stop_exact_processes(executable: Path) -> None:
@@ -162,6 +142,7 @@ def backup_live_state(paths: UserPaths, backup_dir: Path) -> list[str]:
         "desktop-model-providers.json",
         "model-catalogs/openrouter.json",
         "price-refresh-state.json",
+        "install-manifest.json",
     ]
     copied: list[str] = []
     for name in names:
@@ -194,12 +175,16 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
     active_adapter_path = paths.codex_home / "adapter.json"
     active_adapter = json.loads(active_adapter_path.read_text(encoding="utf-8"))
     if known and active_adapter.get("id") == known.get("id"):
-        print(f"UPDATE: active adapter {known['id']} は最新です")
-        return 0
+        receipt = paths.codex_home / "install-manifest.json"
+        if receipt.is_file() and json.loads(receipt.read_text(encoding="utf-8")).get(
+            "release_version"
+        ) == __version__:
+            print(f"UPDATE: v{__version__} / adapter {known['id']} は最新です")
+            return 0
     if known:
-        raise CandidateError(
-            "新しいknown adapterはrelease bundle更新後にsetupで適用してください。active appは変更していません"
-        )
+        from .upgrade import upgrade
+
+        return upgrade(source_root, paths, profile_argument)
 
     profile_path = (
         paths.codex_home / "profile.json"
@@ -244,6 +229,23 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
     report["checks"].append("stock-signature-and-hash-unchanged")
 
     render_runtime(source_root, profile_path, staging_home, paths.credential_helper)
+    runtime_bin = candidate_root / "runtime-bin"
+    runtime_bin.mkdir(mode=0o700)
+    python = shutil.which("python3") or "/usr/bin/python3"
+    from .upgrade import render_template
+
+    render_template(
+        source_root / "portable/templates/codex-openrouter-refresh.py.in",
+        runtime_bin / "codex-openrouter-refresh",
+        paths.home,
+        python,
+    )
+    render_template(
+        source_root / "portable/templates/codex-openrouter-doctor.py.in",
+        runtime_bin / "codex-openrouter-doctor",
+        paths.home,
+        python,
+    )
     js_root = candidate_root / "semantic-patcher"
     run(["/usr/bin/ditto", str(source_root / "portable/patcher-js"), str(js_root)])
     npm = shutil.which("npm")
@@ -252,12 +254,15 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
         raise CandidateError("unknown-build candidateにはNode.jsとnpmが必要です")
     run([npm, "ci", "--ignore-scripts"], cwd=js_root)
 
-    patch_root = paths.home / ".local/share/codex-openrouter-patcher" / UPSTREAM_COMMIT
+    manifest = json.loads(
+        (source_root / "portable/manifest.json").read_text(encoding="utf-8")
+    )["upstream_patcher"]
+    patch_root = paths.home / ".local/share/codex-openrouter-patcher" / manifest["commit"]
     upstream = patch_root / "patch_chatgpt_providers.py"
     license_path = patch_root / "LICENSE"
-    if not upstream.is_file() or sha256(upstream) != UPSTREAM_SOURCE_SHA256:
+    if not upstream.is_file() or sha256(upstream) != manifest["source_sha256"]:
         raise CandidateError("pinned upstream patcherが欠落またはhash不一致です")
-    if not license_path.is_file() or sha256(license_path) != UPSTREAM_LICENSE_SHA256:
+    if not license_path.is_file() or sha256(license_path) != manifest["license_sha256"]:
         raise CandidateError("pinned upstream Unlicenseが欠落またはhash不一致です")
 
     adapter_output = candidate_root / "adapter.json"
@@ -275,6 +280,8 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
             str(candidate_root / "patch-backup"),
             "--upstream",
             str(upstream),
+            "--upstream-sha256",
+            manifest["source_sha256"],
             "--transform",
             str(js_root / "semantic_transform.mjs"),
             "--node",
@@ -316,8 +323,8 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
             "CODEX_OPENROUTER_CREDENTIAL": str(paths.credential_helper),
         }
     )
-    refresh = paths.bin_dir / "codex-openrouter-refresh"
-    doctor = paths.bin_dir / "codex-openrouter-doctor"
+    refresh = runtime_bin / "codex-openrouter-refresh"
+    doctor = runtime_bin / "codex-openrouter-doctor"
     run([str(refresh), "--init"], environment=environment)
     print("INFO: candidate network canaryは少量のOpenRouter API利用料が発生する場合があります。")
     doctor_preflight = run(
@@ -404,21 +411,51 @@ def update(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
                 staging_home / "price-refresh-state.json",
                 paths.codex_home / "price-refresh-state.json",
             )
-        active_user_data = paths.codex_home / "user-data" / candidate_adapter["id"]
-        active_user_data.parent.mkdir(parents=True, exist_ok=True)
-        if active_user_data.exists():
-            raise CandidateError(f"candidate userData target already exists: {active_user_data}")
-        run(["/usr/bin/ditto", str(user_data), str(active_user_data)])
-
-        run([str(doctor), "--network", "--secret-scan"])
+        source_commit_result = subprocess.run(
+            ["/usr/bin/git", "-C", str(source_root), "rev-parse", "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        source_commit = (
+            source_commit_result.stdout.strip()
+            if source_commit_result.returncode == 0 and source_commit_result.stdout.strip()
+            else "release-archive"
+        )
         workspace = Path.cwd()
         receipt = paths.codex_home / "install-manifest.json"
         if receipt.is_file():
             saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
             if isinstance(saved, str) and Path(saved).is_dir():
                 workspace = Path(saved)
+        write_json(
+            receipt,
+            {
+                "schema_version": 2,
+                "release_version": __version__,
+                "source_commit": source_commit,
+                "adapter_id": candidate_adapter["id"],
+                "chatgpt_version": stock.version,
+                "chatgpt_build": stock.build,
+                "stock_asar_sha256": stock.asar_sha256,
+                "workspace": str(workspace),
+            },
+        )
+        active_user_data = paths.codex_home / "user-data" / candidate_adapter["id"]
+        active_user_data.parent.mkdir(parents=True, exist_ok=True)
+        if active_user_data.exists():
+            raise CandidateError(f"candidate userData target already exists: {active_user_data}")
+        run(["/usr/bin/ditto", str(user_data), str(active_user_data)])
+
+        run(
+            [str(doctor), "--network", "--secret-scan"],
+            environment=command_environment(source_root),
+        )
         run([str(paths.bin_dir / "codex-openrouter-app"), str(workspace)])
-        run([str(doctor), "--runtime", "--secret-scan"])
+        run(
+            [str(doctor), "--runtime", "--secret-scan"],
+            environment=command_environment(source_root),
+        )
         if detect_stock(paths.stock_app) != stock:
             raise CandidateError("昇格後にstock appの署名/version/build/hashが変化しました")
     except Exception as promotion_error:

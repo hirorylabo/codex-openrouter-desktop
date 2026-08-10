@@ -12,6 +12,7 @@ readonly LAUNCHER_LOG="$LOG_DIR/launcher.log"
 readonly DOCTOR="@@USER_HOME@@/.local/bin/codex-openrouter-doctor"
 readonly REFRESH="@@USER_HOME@@/.local/bin/codex-openrouter-refresh"
 readonly PYTHON="@@PYTHON@@"
+readonly SUPPORT_ROOT="@@USER_HOME@@/.local/share/codex-openrouter-desktop/current"
 readonly EXECUTABLE="$OPENROUTER_APP/Contents/MacOS/ChatGPT"
 readonly MAX_LOG_BYTES=$((10 * 1024 * 1024))
 
@@ -87,16 +88,16 @@ set -e
 [[ "$refresh_status" -eq 0 || "$refresh_status" -eq 2 ]] || \
   fail "モデルカタログの契約検証に失敗しました。詳細: $LAUNCHER_LOG"
 
-process_table="$(/bin/ps -axo pid=,command=)" || fail "process listを取得できません。"
 existing=()
-while read -r pid command_line; do
-  [[ "$pid" == <-> ]] || continue
-  [[ "$command_line" == "$EXECUTABLE" || "$command_line" == "$EXECUTABLE"\ * ]] && \
-    existing+=("$pid $command_line")
-done <<< "$process_table"
+process_pids="$(PYTHONPATH="$SUPPORT_ROOT/src" "$PYTHON" -m codex_openrouter.processes \
+  --executable "$EXECUTABLE")" || fail "process listを取得できません。"
+while read -r pid; do
+  [[ "$pid" == <-> ]] && existing+=("$pid")
+done <<< "$process_pids"
 (( ${#existing[@]} <= 1 )) || fail "専用app main processが複数あります。通常終了してください。"
 if (( ${#existing[@]} == 1 )); then
-  [[ "${existing[1]}" == *"--user-data-dir=$USER_DATA_DIR"* ]] || \
+  command_line="$(/bin/ps -p "${existing[1]}" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *"--user-data-dir=$USER_DATA_DIR"* ]] || \
     fail "既存の専用appが別userDataで動作しています。"
   "$PYTHON" "$DOCTOR" --runtime
   exit 0

@@ -5,6 +5,8 @@ from typing import Any
 import urllib.error
 import urllib.request
 
+from . import __version__
+
 
 BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -19,7 +21,7 @@ def _get_json(path: str, key: str) -> dict[str, Any]:
         headers={
             "Authorization": f"Bearer {key}",
             "Accept": "application/json",
-            "User-Agent": "codex-openrouter-desktop/0.1.0",
+            "User-Agent": f"codex-openrouter-desktop/{__version__}",
         },
     )
     try:

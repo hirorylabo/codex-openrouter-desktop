@@ -10,7 +10,7 @@
 ## 対象と制限
 
 - Apple Silicon macOSのみ。Windows、Linux、Intel Mac、Homebrewは未対応です。
-- `v0.1.0`はprereleaseです。known buildはChatGPT `26.803.41515` build `6321`だけです。
+- `v0.1.1`はprereleaseです。known buildはChatGPT `26.803.41515` build `6321`だけです。
 - 未知buildのcandidate transformはbest-effortです。純正appへは書き込まず、目視承認なしに昇格しません。
 - OpenRouter API利用料は利用者負担です。`doctor --network`とcandidate検査でも少量の料金が発生する場合があります。
 
@@ -20,16 +20,16 @@
 
 ```bash
 mkdir codex-openrouter-download && cd codex-openrouter-download
-gh release download v0.1.0 \
+gh release download v0.1.1 \
   --repo hirorylabo/codex-openrouter-desktop \
-  --pattern 'codex-openrouter-desktop-v0.1.0.tar.gz' \
-  --pattern 'codex-openrouter-desktop-v0.1.0.spdx.json' \
+  --pattern 'codex-openrouter-desktop-v0.1.1.tar.gz' \
+  --pattern 'codex-openrouter-desktop-v0.1.1.spdx.json' \
   --pattern 'SHA256SUMS'
-gh attestation verify codex-openrouter-desktop-v0.1.0.tar.gz \
+gh attestation verify codex-openrouter-desktop-v0.1.1.tar.gz \
   --repo hirorylabo/codex-openrouter-desktop
 shasum -a 256 -c SHA256SUMS
-tar -xzf codex-openrouter-desktop-v0.1.0.tar.gz
-cd codex-openrouter-desktop-v0.1.0
+tar -xzf codex-openrouter-desktop-v0.1.1.tar.gz
+cd codex-openrouter-desktop-v0.1.1
 ```
 
 sourceから使う場合も、Release archiveと同じallowlistを推奨します。
@@ -83,11 +83,14 @@ codex-openrouter setup [--workspace PATH] [--profile default|FILE] [--auth oauth
 codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter update
+codex-openrouter upgrade [--profile default|FILE]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
 
 セットアップ後は`$HOME/.local/bin`を`PATH`へ追加してください。Desktopの`Codex OpenRouter.app`へfolderをdropして起動することもできます。
+
+FinderでDesktopの「スタックを使用」がONの場合、launcherは「アプリケーション」stack内へ表示されます。直接見える位置へ置く場合はFinderの`表示 > スタックを使用`をOFFにしてください。launcherはproject固有icon、bundle署名、既定workspaceをsetup/upgradeごとに再生成します。
 
 ## Profile
 
@@ -110,7 +113,15 @@ API keyから見えるconcrete model集合がprofileと完全一致しない場�
 codex-openrouter update
 ```
 
-known buildはRelease同梱の[`adapters/index.json`](./adapters/index.json)でversion、build、stock/patched ASAR hash、markerを固定します。未知buildでは純正appを変更せずcandidate cloneだけを作ります。lockfile固定のJS parserがrouting、model visibility、label fallbackのsemantic anchorを各1件だけ認識した場合に限りpatchします。
+`update`は、known buildなら`upgrade`、未知buildならcandidate作成へ進みます。release archiveを更新した後、専用appを通常終了して次を実行すると、runtime・設定・known adapter appをstagingで検査してから切り替えます。
+
+```bash
+./codex-openrouter upgrade
+```
+
+upgradeは現行targetを削除せずbackupへ保持し、切替後doctorが失敗した場合は全targetを自動rollbackします。成功後も`codex-openrouter rollback`で直前のruntime一式へ戻せます。known buildはRelease同梱の[`adapters/index.json`](./adapters/index.json)でversion、build、stock/patched ASAR hash、markerを固定します。rebuildとinstallerはactive adapterとindexの完全一致からpatcherを解決し、build固有の値をruntime scriptへ重複させません。
+
+未知buildでは純正appを変更せずcandidate cloneだけを作ります。lockfile固定のJS parserがrouting、model visibility、label fallbackのsemantic anchorを各1件だけ認識した場合に限りpatchします。
 
 Candidateは署名、ASAR integrity、App Server model list、全model／公開effortの`provider.zdr=true` canary、実providerが稼働中ZDR endpointであることを検査します。その後、利用者がモデルピッカーとタスク開始を目視確認し、`PROMOTE`と入力した場合だけ昇格します。昇格後doctorが失敗すれば旧appと設定へ自動rollbackし、失敗candidateと秘密値除外済み診断bundleを保持します。診断情報は自動送信しません。
 

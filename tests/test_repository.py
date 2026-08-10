@@ -63,8 +63,8 @@ class RepositoryTests(unittest.TestCase):
         adapters = json.loads((ROOT / "adapters/index.json").read_text(encoding="utf-8"))
         self.assertEqual(1, registry["schema_version"])
         self.assertEqual(set(profile["models"]), set(registry["models"]))
-        self.assertEqual(1, len(adapters["adapters"]))
-        self.assertEqual("exact", adapters["adapters"][0]["patch_strategy"])
+        self.assertGreaterEqual(len(adapters["adapters"]), 1)
+        self.assertTrue(all(adapter["patch_strategy"] == "exact" for adapter in adapters["adapters"]))
 
     def test_upstream_license_contract_is_unlicense(self) -> None:
         manifest = json.loads((ROOT / "portable/manifest.json").read_text(encoding="utf-8"))
@@ -74,10 +74,46 @@ class RepositoryTests(unittest.TestCase):
 
     def test_network_doctor_verifies_request_zdr_generation_provider(self) -> None:
         source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(encoding="utf-8")
-        self.assertIn('"provider": {"zdr": True}', source)
+        self.assertIn('provider: dict[str, object] = {"zdr": True}', source)
+        self.assertIn('provider["order"] = provider_tags', source)
+        self.assertIn('provider["allow_fallbacks"] = False', source)
         self.assertIn('"X-Generation-Id"', source)
         self.assertIn('metadata.get("provider_name")', source)
         self.assertIn("/api/v1/endpoints/zdr", source)
+
+    def test_network_request_pins_active_zdr_provider_tags(self) -> None:
+        doctor = load_doctor_template()
+
+        class Response:
+            status = 200
+            headers = {"X-Generation-Id": "gen-test"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"model":"example/model"}'
+
+        with mock.patch.object(doctor.urllib.request, "urlopen", return_value=Response()) as urlopen:
+            status, body, generation_id = doctor.request_model(
+                "secret", "example/model", "high", ["provider-a", "provider-b"]
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(200, status)
+        self.assertEqual("example/model", body["model"])
+        self.assertEqual("gen-test", generation_id)
+        self.assertEqual(
+            {
+                "zdr": True,
+                "order": ["provider-a", "provider-b"],
+                "allow_fallbacks": False,
+            },
+            payload["provider"],
+        )
 
     def test_generation_metadata_retries_eventual_404(self) -> None:
         doctor = load_doctor_template()
@@ -120,18 +156,47 @@ class RepositoryTests(unittest.TestCase):
 
     def test_runtime_process_match_excludes_wrapper_commands(self) -> None:
         doctor = load_doctor_template()
-        executable = f"{doctor.OPENROUTER_APP}/Contents/MacOS/ChatGPT"
+        executable = doctor.OPENROUTER_APP / "Contents/MacOS/ChatGPT"
         real = f"  123 {executable} --user-data-dir=/tmp/user-data"
         wrapper = f"  456 /bin/zsh -lc echo {executable}"
-        self.assertEqual([real], doctor.openrouter_main_processes(f"{real}\n{wrapper}\n"))
+        self.assertEqual(
+            [(123, f"{executable} --user-data-dir=/tmp/user-data")],
+            doctor.matching_processes(f"{real}\n{wrapper}\n", executable),
+        )
 
     def test_launcher_process_match_is_anchored_to_command_start(self) -> None:
         source = (ROOT / "portable/templates/codex-openrouter-app.zsh.in").read_text(
             encoding="utf-8"
         )
-        self.assertIn("while read -r pid command_line", source)
-        self.assertIn('"$command_line" == "$EXECUTABLE"', source)
-        self.assertNotIn('"$line" == *"$EXECUTABLE"*', source)
+        self.assertIn("codex_openrouter.processes", source)
+        self.assertIn('--executable "$EXECUTABLE"', source)
+        self.assertNotIn("/bin/ps -axo pid=,command=", source)
+
+    def test_runtime_rebuild_has_no_build_specific_literals(self) -> None:
+        source = (ROOT / "portable/templates/codex-openrouter-rebuild.zsh.in").read_text(encoding="utf-8")
+        self.assertIn("$ACTIVE_ADAPTER", source)
+        self.assertIn('active adapter is not exactly present in index', source)
+        self.assertNotIn("patch_build_6321.py", source)
+        self.assertNotIn('EXPECTED_BUILD="6321"', source)
+
+    def test_upgrade_validates_staging_files_with_final_runtime_paths(self) -> None:
+        renderer = (ROOT / "portable/render_runtime.py").read_text(encoding="utf-8")
+        upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
+        doctor = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('parser.add_argument("--runtime-home", type=Path)', renderer)
+        self.assertIn('"--runtime-home",', upgrade)
+        self.assertIn('"CODEX_OPENROUTER_RUNTIME_HOME": str(paths.codex_home)', upgrade)
+        self.assertIn("RUNTIME_CATALOG = RUNTIME_HOME", doctor)
+
+    def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
+        info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
+        installer = (ROOT / "portable/install.sh").read_text(encoding="utf-8")
+        self.assertIn("CFBundleIconFile", info)
+        self.assertIn("AppIcon", info)
+        self.assertIn("build_icon.zsh", installer)
+        self.assertTrue((ROOT / "portable/launcher/CreateLauncherIcon.swift").is_file())
 
 
 if __name__ == "__main__":

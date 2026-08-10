@@ -1,16 +1,15 @@
 #!/bin/zsh
 set -eu
+setopt pipefail
 
 readonly STOCK_APP="/Applications/ChatGPT.app"
 readonly TARGET_APP="@@USER_HOME@@/Applications/ChatGPT OpenRouter.app"
 readonly BACKUP_ROOT="@@USER_HOME@@/Applications/ChatGPT OpenRouter Backups"
-readonly PATCH_ROOT="@@USER_HOME@@/.local/share/codex-openrouter-patcher/4e19e474330dc5266eb814e425410127aa7c1a4e"
-readonly PROVIDER_CONFIG="@@USER_HOME@@/.codex-openrouter/desktop-model-providers.json"
+readonly CODEX_HOME="@@USER_HOME@@/.codex-openrouter"
+readonly SUPPORT_ROOT="@@USER_HOME@@/.local/share/codex-openrouter-desktop/current"
+readonly PROVIDER_CONFIG="$CODEX_HOME/desktop-model-providers.json"
+readonly ACTIVE_ADAPTER="$CODEX_HOME/adapter.json"
 readonly PYTHON="@@PYTHON@@"
-readonly EXPECTED_VERSION="26.803.41515"
-readonly EXPECTED_BUILD="6321"
-readonly EXPECTED_STOCK_ASAR="5f6e773aafd542d3cf09e10b5dca6cabd301d0a155f4b8ce870e3915fc3da25e"
-readonly EXPECTED_PATCHED_ASAR="994c852acf66b51bdd826457e5fafcde9827ddc7db9f9a92518b77e6f235949d"
 
 fail() {
   print -u2 -- "Codex OpenRouter rebuild: $*"
@@ -25,6 +24,38 @@ file_sha256() {
   /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
 }
 
+for required in "$ACTIVE_ADAPTER" "$SUPPORT_ROOT/adapters/index.json" \
+  "$SUPPORT_ROOT/portable/manifest.json" "$PROVIDER_CONFIG"; do
+  [[ -f "$required" && ! -L "$required" ]] || fail "必要ファイルがありません: $required"
+done
+
+runtime_fields="$(PYTHONPATH="$SUPPORT_ROOT/src" "$PYTHON" - \
+  "$ACTIVE_ADAPTER" "$SUPPORT_ROOT/adapters/index.json" \
+  "$SUPPORT_ROOT/portable/manifest.json" "$SUPPORT_ROOT" <<'PY'
+import json, re, sys
+from pathlib import Path
+active=json.load(open(sys.argv[1], encoding="utf-8"))
+index=json.load(open(sys.argv[2], encoding="utf-8"))
+matches=[item for item in index.get("adapters", []) if item == active]
+if len(matches) != 1: raise SystemExit("active adapter is not exactly present in index")
+values=[active.get(key) for key in (
+    "id", "chatgpt_version", "chatgpt_build", "stock_asar_sha256",
+    "patched_asar_sha256", "marker", "patcher",
+)]
+if not all(isinstance(value, str) and value for value in values): raise SystemExit("invalid adapter")
+if not re.fullmatch(r"[A-Za-z0-9._-]+", values[0]): raise SystemExit("invalid adapter id")
+if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in values[3:5]): raise SystemExit("invalid hash")
+patcher=(Path(sys.argv[4]) / values[6]).resolve()
+if not patcher.is_relative_to(Path(sys.argv[4]).resolve()) or not patcher.is_file():
+    raise SystemExit("unsafe or missing adapter patcher")
+upstream=json.load(open(sys.argv[3], encoding="utf-8"))["upstream_patcher"]
+print("\t".join([*values[:6], str(patcher), upstream["commit"], upstream["source_sha256"]]))
+PY
+)" || fail "active adapter、index、manifestの契約が一致しません"
+IFS=$'\t' read -r ADAPTER_ID EXPECTED_VERSION EXPECTED_BUILD EXPECTED_STOCK_ASAR \
+  EXPECTED_PATCHED_ASAR PATCH_MARKER PATCHER UPSTREAM_COMMIT UPSTREAM_SHA256 <<< "$runtime_fields"
+readonly PATCH_ROOT="@@USER_HOME@@/.local/share/codex-openrouter-patcher/$UPSTREAM_COMMIT"
+
 [[ -d "$STOCK_APP" ]] || fail "純正アプリが見つかりません: $STOCK_APP"
 /usr/bin/codesign --verify --deep --strict "$STOCK_APP" >/dev/null 2>&1 || \
   fail "純正アプリの署名検証に失敗しました。純正appには書き込まず停止します。"
@@ -35,17 +66,14 @@ build="$(bundle_value "$STOCK_APP" CFBundleVersion)"
 stock_hash="$(file_sha256 "$STOCK_APP/Contents/Resources/app.asar")"
 [[ "$stock_hash" == "$EXPECTED_STOCK_ASAR" ]] || \
   fail "純正ASARが検証済みハッシュと一致しません。"
+[[ -f "$PATCH_ROOT/patch_chatgpt_providers.py" ]] || \
+  fail "pinned upstream patcherがありません: $PATCH_ROOT"
+[[ "$(file_sha256 "$PATCH_ROOT/patch_chatgpt_providers.py")" == "$UPSTREAM_SHA256" ]] || \
+  fail "pinned upstream patcherのhashが一致しません"
 
-for required in \
-  "$PATCH_ROOT/patch_chatgpt_providers.py" \
-  "$PATCH_ROOT/patch_build_6321.py" \
-  "$PROVIDER_CONFIG"; do
-  [[ -f "$required" ]] || fail "必要ファイルがありません: $required"
-done
-
-if /bin/ps -axo command= | /usr/bin/grep -F "$TARGET_APP/Contents/MacOS/" | /usr/bin/grep -v grep >/dev/null; then
-  fail "専用アプリが起動中です。通常終了してから再実行してください。"
-fi
+active_pids="$(PYTHONPATH="$SUPPORT_ROOT/src" "$PYTHON" -m codex_openrouter.processes \
+  --executable "$TARGET_APP/Contents/MacOS/ChatGPT")" || fail "process listを取得できません"
+[[ -z "$active_pids" ]] || fail "専用アプリが起動中です。通常終了してから再実行してください。"
 
 stock_size_kb="$(/usr/bin/du -sk "$STOCK_APP" | /usr/bin/awk '{print $1}')"
 available_kb="$(/bin/df -Pk "@@USER_HOME@@/Applications" | /usr/bin/awk 'NR == 2 {print $4}')"
@@ -55,34 +83,35 @@ required_kb=$(( stock_size_kb * 3 + 1024 * 1024 ))
 
 timestamp="$(/bin/date +%Y%m%d-%H%M%S)"
 /bin/mkdir -p "$BACKUP_ROOT"
+readonly STAGED_APP="@@USER_HOME@@/Applications/.ChatGPT OpenRouter.rebuild-$timestamp.app"
+[[ ! -e "$STAGED_APP" && ! -L "$STAGED_APP" ]] || fail "staging targetが既に存在します: $STAGED_APP"
+/usr/bin/ditto "$STOCK_APP" "$STAGED_APP" || fail "staging cloneに失敗しました"
+patch_backup="$BACKUP_ROOT/patch-$timestamp"
+if ! "$PYTHON" "$PATCHER" \
+  --app "$STAGED_APP" \
+  --config "$PROVIDER_CONFIG" \
+  --backup-dir "$patch_backup" \
+  --upstream "$PATCH_ROOT/patch_chatgpt_providers.py" \
+  --upstream-sha256 "$UPSTREAM_SHA256"; then
+  fail "パッチに失敗しました。失敗したstaging appは削除していません: $STAGED_APP"
+fi
+patched_hash="$(file_sha256 "$STAGED_APP/Contents/Resources/app.asar")"
+[[ "$patched_hash" == "$EXPECTED_PATCHED_ASAR" ]] || \
+  fail "再構築後ASARのハッシュが期待値と一致しません: $patched_hash"
+/usr/bin/grep -aFq "$PATCH_MARKER" "$STAGED_APP/Contents/Resources/app.asar" || \
+  fail "staging appにadapter markerがありません"
+/usr/bin/codesign --verify --deep --strict "$STAGED_APP" || \
+  fail "再構築後の署名検証に失敗しました。"
+
 previous_backup=""
 if [[ -d "$TARGET_APP" ]]; then
   previous_backup="$BACKUP_ROOT/ChatGPT OpenRouter.pre-rebuild-$timestamp.app"
   /bin/mv "$TARGET_APP" "$previous_backup"
-  print -- "既存の専用アプリを退避しました: $previous_backup"
+fi
+if ! /bin/mv "$STAGED_APP" "$TARGET_APP"; then
+  [[ -z "$previous_backup" ]] || /bin/mv "$previous_backup" "$TARGET_APP"
+  fail "atomic切替に失敗し、以前の専用appを復元しました"
 fi
 
-if ! /usr/bin/ditto "$STOCK_APP" "$TARGET_APP"; then
-  print -u2 -- "複製に失敗しました。既存版は次に残っています: ${previous_backup:-なし}"
-  exit 1
-fi
-
-patch_backup="$BACKUP_ROOT/patch-$timestamp"
-if ! "$PYTHON" "$PATCH_ROOT/patch_build_6321.py" \
-  --app "$TARGET_APP" \
-  --config "$PROVIDER_CONFIG" \
-  --backup-dir "$patch_backup" \
-  --upstream "$PATCH_ROOT/patch_chatgpt_providers.py"; then
-  print -u2 -- "パッチに失敗しました。失敗した複製は削除していません: $TARGET_APP"
-  print -u2 -- "以前の専用アプリ: ${previous_backup:-なし}"
-  exit 1
-fi
-
-patched_hash="$(file_sha256 "$TARGET_APP/Contents/Resources/app.asar")"
-[[ "$patched_hash" == "$EXPECTED_PATCHED_ASAR" ]] || \
-  fail "再構築後ASARのハッシュが期待値と一致しません: $patched_hash"
-/usr/bin/codesign --verify --deep --strict "$TARGET_APP" || \
-  fail "再構築後の署名検証に失敗しました。"
-
-print -- "再構築と検証が完了しました: $TARGET_APP"
+print -- "再構築と検証が完了しました: $TARGET_APP (adapter=$ADAPTER_ID)"
 [[ -z "$previous_backup" ]] || print -- "復元用の以前の専用アプリ: $previous_backup"

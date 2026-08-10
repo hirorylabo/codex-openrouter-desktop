@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Only the latest prerelease is supported. `v0.1.0` is experimental and supports only the build listed in `adapters/index.json`.
+Only the version in the root `VERSION` file is supported. It is experimental and supports only builds listed in `adapters/index.json`.
 
 ## Report a vulnerability
 

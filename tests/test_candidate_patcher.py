@@ -44,6 +44,8 @@ class CandidatePatcherTests(unittest.TestCase):
                     str(candidate_root / "backup"),
                     "--upstream",
                     str(candidate_root / "missing-upstream.py"),
+                    "--upstream-sha256",
+                    "0" * 64,
                     "--transform",
                     str(candidate_root / "missing-transform.mjs"),
                     "--node",

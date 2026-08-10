@@ -4,11 +4,7 @@ setopt pipefail
 
 readonly SCRIPT_DIR="${0:A:h}"
 readonly REPO_ROOT="${SCRIPT_DIR:h}"
-readonly UPSTREAM_COMMIT="4e19e474330dc5266eb814e425410127aa7c1a4e"
-readonly UPSTREAM_SHA256="ec63e9ba109ec171162c5bd846359ed727368eb3154b2cdeade123afeae3ffb4"
-readonly UPSTREAM_LICENSE_SHA256="6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e"
-readonly UPSTREAM_SOURCE_URL="https://raw.githubusercontent.com/Keksuccino/Better-Codex-App-Custom-Provider-Support/${UPSTREAM_COMMIT}/patch_chatgpt_providers.py"
-readonly UPSTREAM_LICENSE_URL="https://raw.githubusercontent.com/Keksuccino/Better-Codex-App-Custom-Provider-Support/${UPSTREAM_COMMIT}/LICENSE"
+readonly MANIFEST="$REPO_ROOT/portable/manifest.json"
 
 fail() {
   print -u2 -- "codex-openrouter installer: $*"
@@ -56,7 +52,6 @@ readonly OPENROUTER_APP="$USER_HOME/Applications/ChatGPT OpenRouter.app"
 readonly OPENROUTER_HOME="$USER_HOME/.codex-openrouter"
 readonly BIN_DIR="$USER_HOME/.local/bin"
 readonly SUPPORT_ROOT="$USER_HOME/.local/share/codex-openrouter-desktop/current"
-readonly PATCH_ROOT="$USER_HOME/.local/share/codex-openrouter-patcher/$UPSTREAM_COMMIT"
 readonly DESKTOP_APP="$USER_HOME/Desktop/Codex OpenRouter.app"
 readonly REGISTRY="$REPO_ROOT/models/registry.json"
 readonly ADAPTER_INDEX="$REPO_ROOT/adapters/index.json"
@@ -79,6 +74,20 @@ readonly PYTHON="$(command_path python3)"
 [[ -n "$PYTHON" ]] || fail "Python 3が見つかりません"
 "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || \
   fail "Python 3.11以上が必要です"
+upstream_fields="$($PYTHON - "$MANIFEST" <<'PY'
+import json, re, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))["upstream_patcher"]
+values=[d.get(k) for k in ("commit","source_sha256","license_sha256","source_url","license_url")]
+if not all(isinstance(v,str) and v for v in values): raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", values[0]): raise SystemExit(1)
+if not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in values[1:3]): raise SystemExit(1)
+if not all(v.startswith("https://") for v in values[3:]): raise SystemExit(1)
+print("\t".join(values))
+PY
+)" || fail "portable manifestのupstream contractが不正です"
+IFS=$'\t' read -r UPSTREAM_COMMIT UPSTREAM_SHA256 UPSTREAM_LICENSE_SHA256 \
+  UPSTREAM_SOURCE_URL UPSTREAM_LICENSE_URL <<< "$upstream_fields"
+readonly PATCH_ROOT="$USER_HOME/.local/share/codex-openrouter-patcher/$UPSTREAM_COMMIT"
 [[ "$(/usr/bin/uname -m)" == arm64 ]] || fail "Apple Silicon macOS専用です"
 [[ -n "$(command_path npx)" ]] || fail "Node.jsのnpxが必要です"
 /usr/bin/xcrun --find swiftc >/dev/null 2>&1 || fail "Xcode Command Line Toolsが必要です"
@@ -97,12 +106,15 @@ readonly DETECTED_VERSION="$(bundle_value "$STOCK_APP" CFBundleShortVersionStrin
 readonly DETECTED_BUILD="$(bundle_value "$STOCK_APP" CFBundleVersion)"
 readonly DETECTED_STOCK_ASAR="$(file_sha256 "$STOCK_ASAR")"
 
-adapter_fields="$(PYTHONPATH="$REPO_ROOT/src" "$PYTHON" - "$ADAPTER_INDEX" "$DETECTED_VERSION" "$DETECTED_BUILD" "$DETECTED_STOCK_ASAR" <<'PY'
+adapter_fields="$(PYTHONPATH="$REPO_ROOT/src" "$PYTHON" - "$ADAPTER_INDEX" "$DETECTED_VERSION" "$DETECTED_BUILD" "$DETECTED_STOCK_ASAR" "$REPO_ROOT" <<'PY'
 import json, sys
+from pathlib import Path
 doc=json.load(open(sys.argv[1], encoding="utf-8"))
 matches=[a for a in doc.get("adapters",[]) if a.get("chatgpt_version")==sys.argv[2] and str(a.get("chatgpt_build"))==sys.argv[3] and a.get("stock_asar_sha256")==sys.argv[4]]
 if len(matches)!=1: raise SystemExit(1)
 a=matches[0]
+patcher=(Path(sys.argv[5]) / str(a.get("patcher", ""))).resolve()
+if not patcher.is_relative_to(Path(sys.argv[5]).resolve()) or not patcher.is_file(): raise SystemExit(1)
 print("\t".join(str(a[k]) for k in ("id","patched_asar_sha256","marker","patcher")))
 PY
 )" || fail "検証済みadapterがありません。codex-openrouter updateでcandidateを作成してください"
@@ -167,6 +179,7 @@ for directory in src models profiles adapters portable; do
   /usr/bin/ditto "$REPO_ROOT/$directory" "$SUPPORT_ROOT/$directory"
 done
 /usr/bin/install -m 755 "$REPO_ROOT/codex-openrouter" "$SUPPORT_ROOT/codex-openrouter"
+/usr/bin/install -m 644 "$REPO_ROOT/VERSION" "$SUPPORT_ROOT/VERSION"
 /usr/bin/install -m 755 "$TEMP_DIR/codex-openrouter-credential" "$BIN_DIR/codex-openrouter-credential"
 /usr/bin/install -m 755 "$SUPPORT_ROOT/codex-openrouter" "$BIN_DIR/codex-openrouter"
 
@@ -188,7 +201,6 @@ PY
 
 /usr/bin/install -m 644 "$TEMP_DIR/patch_chatgpt_providers.py" "$PATCH_ROOT/patch_chatgpt_providers.py"
 /usr/bin/install -m 644 "$TEMP_DIR/UPSTREAM-LICENSE" "$PATCH_ROOT/LICENSE"
-/usr/bin/install -m 755 "$REPO_ROOT/$PATCHER_RELATIVE" "$PATCH_ROOT/patch_build_6321.py"
 
 render_template() {
   local source="$1" target="$2" target_mode="$3" rendered="$TEMP_DIR/${target:t}"
@@ -204,8 +216,13 @@ render_template "$SCRIPT_DIR/templates/codex-openrouter-rebuild.zsh.in" "$BIN_DI
 "$BIN_DIR/codex-openrouter-refresh" --init
 
 readonly LAUNCHER_BUILD="$TEMP_DIR/Codex OpenRouter.app"
-/bin/mkdir -p "$LAUNCHER_BUILD/Contents/MacOS"
+/bin/mkdir -p "$LAUNCHER_BUILD/Contents/MacOS" "$LAUNCHER_BUILD/Contents/Resources"
 /usr/bin/install -m 644 "$SCRIPT_DIR/launcher/Info.plist" "$LAUNCHER_BUILD/Contents/Info.plist"
+launcher_version="$(/bin/cat "$REPO_ROOT/VERSION")"
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$launcher_version" "$LAUNCHER_BUILD/Contents/Info.plist"
+/usr/bin/plutil -replace CFBundleVersion -string "$launcher_version" "$LAUNCHER_BUILD/Contents/Info.plist"
+"$SCRIPT_DIR/launcher/build_icon.zsh" \
+  "$SCRIPT_DIR/launcher/CreateLauncherIcon.swift" "$LAUNCHER_BUILD/Contents/Resources/AppIcon.icns"
 /usr/bin/plutil -replace CodexDefaultWorkspace -string "$workspace" "$LAUNCHER_BUILD/Contents/Info.plist"
 /usr/bin/xcrun swiftc "$SCRIPT_DIR/launcher/CodexOpenRouterLauncher.swift" -o "$LAUNCHER_BUILD/Contents/MacOS/CodexOpenRouterLauncher"
 /usr/bin/codesign --force --sign - "$LAUNCHER_BUILD" >/dev/null
@@ -219,6 +236,8 @@ fi
 "$PYTHON" "$SCRIPT_DIR/write_install_manifest.py" \
   --target "$OPENROUTER_HOME/install-manifest.json" \
   --source-commit "$source_commit" \
+  --release-version "$(/bin/cat "$REPO_ROOT/VERSION")" \
+  --adapter-id "$ADAPTER_ID" \
   --chatgpt-version "$DETECTED_VERSION" \
   --chatgpt-build "$DETECTED_BUILD" \
   --stock-asar-sha256 "$DETECTED_STOCK_ASAR" \

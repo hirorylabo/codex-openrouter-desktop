@@ -1,3 +1,8 @@
 """Unofficial OpenRouter launcher for Codex Desktop on macOS."""
 
-__version__ = "0.1.0"
+from pathlib import Path
+
+
+__version__ = (Path(__file__).resolve().parents[2] / "VERSION").read_text(
+    encoding="utf-8"
+).strip()

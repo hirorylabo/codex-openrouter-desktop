@@ -12,7 +12,6 @@ import subprocess
 import sys
 
 
-EXPECTED_UPSTREAM_SHA256 = "ec63e9ba109ec171162c5bd846359ed727368eb3154b2cdeade123afeae3ffb4"
 UPSTREAM_MARKER = b"__codexDesktopModelProvidersPatchV3"
 CUSTOM_MARKER = b"__codexOpenRouterSemanticCandidateV1"
 VISIBILITY_MARKER = b"__codexOpenRouterSemanticVisibilityV1"
@@ -27,8 +26,8 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_upstream(path: Path):
-    if sha256(path) != EXPECTED_UPSTREAM_SHA256:
+def load_upstream(path: Path, expected_sha256: str):
+    if sha256(path) != expected_sha256:
         raise RuntimeError("Pinned upstream patcher hash mismatch")
     spec = importlib.util.spec_from_file_location("pinned_provider_patcher", path)
     if spec is None or spec.loader is None:
@@ -49,6 +48,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--backup-dir", type=Path, required=True)
     parser.add_argument("--upstream", type=Path, required=True)
+    parser.add_argument("--upstream-sha256", required=True)
     parser.add_argument("--transform", type=Path, required=True)
     parser.add_argument("--node", type=Path, required=True)
     parser.add_argument("--stock-hash", required=True)
@@ -76,7 +76,7 @@ def main() -> int:
     if not isinstance(mappings, dict) or not mappings or set(mappings.values()) != {"openrouter"}:
         raise RuntimeError("Candidate provider mappings are invalid")
 
-    module = load_upstream(args.upstream.resolve())
+    module = load_upstream(args.upstream.resolve(), args.upstream_sha256)
     module.DEFAULT_PROVIDER_CONFIG = provider_config
 
     def semantic_variant(central: Path, picker: Path) -> str:
