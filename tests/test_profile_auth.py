@@ -181,7 +181,9 @@ class AuthenticationTests(unittest.TestCase):
             registry={},
         )
         args = SimpleNamespace(auth_action="rotate", method="paste")
-        with mock.patch.object(cli, "credential_store", return_value=(store, None)), mock.patch.object(
+        with mock.patch.object(
+            cli.UserPaths, "current", return_value=SimpleNamespace()
+        ), mock.patch.object(cli, "credential_store", return_value=(store, None)), mock.patch.object(
             cli, "resolved_profile", return_value=(Path("profile.json"), profile)
         ), mock.patch.object(cli, "obtain_key", return_value=key), mock.patch.object(
             cli, "validate_key_and_profile", return_value={"limit": 10}
