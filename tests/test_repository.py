@@ -65,6 +65,19 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(set(profile["models"]), set(registry["models"]))
         self.assertGreaterEqual(len(adapters["adapters"]), 1)
         self.assertTrue(all(adapter["patch_strategy"] == "exact" for adapter in adapters["adapters"]))
+        self.assertTrue(
+            registry["models"]["deepseek/deepseek-v4-flash-0731"][
+                "supports_parallel_tool_calls"
+            ]
+        )
+        self.assertEqual(
+            ["text", "image", "video"],
+            registry["models"]["moonshotai/kimi-k3"]["openrouter_modalities"],
+        )
+        self.assertEqual(
+            ["text", "image"],
+            registry["models"]["moonshotai/kimi-k3"]["codex_modalities"],
+        )
 
     def test_upstream_license_contract_is_unlicense(self) -> None:
         manifest = json.loads((ROOT / "portable/manifest.json").read_text(encoding="utf-8"))
