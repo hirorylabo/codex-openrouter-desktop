@@ -237,11 +237,21 @@ def check_secret_scan(doctor: Doctor, paths: UserPaths) -> None:
         "鍵はprocess argumentsにありません",
         "鍵がprocess argumentsに露出しています",
     )
-    doctor.expect(
-        "OPENROUTER_API_KEY" not in os.environ,
-        "OPENROUTER_API_KEYは環境にありません",
-        "OPENROUTER_API_KEYが環境に設定されています（Keychain経由のみにしてください）",
-    )
+    # doctor自身の環境ではなく「起動されるappへ渡らないこと」を見る。
+    # 利用者が他ツール用に OPENROUTER_API_KEY をexportしているのは正当なので、
+    # それ自体をfailにすると導入できなくなる。
+    launcher = paths.bin_dir / "codex-openrouter-app"
+    if launcher.is_file():
+        doctor.expect(
+            "unset OPENROUTER_API_KEY" in launcher.read_text(encoding="utf-8"),
+            "ランチャーは起動前にOPENROUTER_API_KEYを外します",
+            "ランチャーがOPENROUTER_API_KEYを外していません。appへ鍵が渡ります",
+        )
+    if "OPENROUTER_API_KEY" in os.environ:
+        doctor.warn(
+            "shellがOPENROUTER_API_KEYをexportしています。"
+            "ランチャーとsupervisorが起動前に外すのでappへは渡りません"
+        )
 
 
 def check_network(doctor: Doctor, paths: UserPaths, registry_models: dict) -> None:

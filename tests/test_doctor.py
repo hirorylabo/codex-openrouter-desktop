@@ -92,6 +92,36 @@ class CatalogCheckTests(DoctorTestCase):
         self.assertTrue(self.doctor.failures)
 
 
+class SecretScanTests(DoctorTestCase):
+    def test_exported_key_is_a_warning_not_a_failure(self):
+        """他ツール用のexportは正当。これでinstallを止めてはいけない。"""
+        import os
+
+        launcher = self.paths.bin_dir / "codex-openrouter-app"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text("unset OPENROUTER_API_KEY CODEX_ACCESS_TOKEN\n")
+        previous = os.environ.get("OPENROUTER_API_KEY")
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-testonlyvalue"
+        self.addCleanup(
+            lambda: os.environ.__setitem__("OPENROUTER_API_KEY", previous)
+            if previous is not None
+            else os.environ.pop("OPENROUTER_API_KEY", None)
+        )
+        doctor_module.check_secret_scan(self.doctor, self.paths)
+        # process argumentsの検査はマシン全体の状態に依存するので、
+        # ここでは「環境変数とランチャーについてのfailureが無いこと」だけを見る。
+        self.assertEqual(
+            [f for f in self.doctor.failures if "OPENROUTER_API_KEY" in f], []
+        )
+
+    def test_launcher_that_keeps_the_key_is_a_failure(self):
+        launcher = self.paths.bin_dir / "codex-openrouter-app"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text("exec ChatGPT\n")
+        doctor_module.check_secret_scan(self.doctor, self.paths)
+        self.assertTrue(any("渡ります" in f for f in self.doctor.failures), self.doctor.failures)
+
+
 class GuardCheckTests(DoctorTestCase):
     def test_free_port_is_reported_as_stopped(self):
         port = guard_module.free_port()
