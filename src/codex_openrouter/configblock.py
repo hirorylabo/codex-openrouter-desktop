@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import tomllib
 
 MARKER_PREFIX = "codex-openrouter"
 _TMP_SEQUENCE = itertools.count()
@@ -126,6 +127,61 @@ def remove_top_level(text: str, key: str) -> str:
     tail = text[index:]
     pattern = re.compile(r"(?m)^[ \t]*" + re.escape(key) + r"[ \t]*=[ \t]*.*$\n?")
     return pattern.sub("", head, count=1) + tail
+
+
+def _validate_toml(text: str) -> dict:
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigBlockError(f"config.tomlが不正です: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ConfigBlockError("config.tomlのトップレベルがtableではありません")
+    return document
+
+
+def _validate_marker(text: str, name: str) -> None:
+    begins = text.count(_begin(name))
+    ends = text.count(_end(name))
+    if begins != ends or begins not in (0, 1):
+        raise ConfigBlockError(f"managed {name} markerが重複または破損しています")
+    if begins == 1 and len(_block_re(name).findall(text)) != 1:
+        raise ConfigBlockError(f"managed {name} blockを安全に解釈できません")
+
+
+def render_managed(
+    text: str,
+    *,
+    provider_body: str,
+    catalog_body: str | None = None,
+) -> str:
+    """managed catalog/providerを非重複の1回変換で組み直す。
+
+    marker外の同名設定は利用者所有とみなし、推測で採用・上書きしない。
+    旧実装でcatalog markerがprovider table内へ入ったconfigも、両blockを一度
+    除去してから正しい位置へ再構築することで移行する。
+    """
+    _validate_toml(text)
+    for name in ("catalog", "provider"):
+        _validate_marker(text, name)
+
+    unmanaged = remove_block(remove_block(text, "catalog"), "provider")
+    document = _validate_toml(unmanaged)
+    if "model_catalog_json" in document:
+        raise ConfigBlockError(
+            "marker外のmodel_catalog_jsonがあります。既存設定を変更せず停止します"
+        )
+    providers = document.get("model_providers")
+    if isinstance(providers, dict) and "openrouter" in providers:
+        raise ConfigBlockError(
+            "marker外のmodel_providers.openrouterがあります。既存設定を変更せず停止します"
+        )
+
+    updated = unmanaged
+    if catalog_body is not None:
+        updated = insert_block(updated, "catalog", catalog_body, top_level=True)
+    updated = insert_block(updated, "provider", provider_body, top_level=False)
+    _validate_toml(updated)
+    return updated
 
 
 @contextlib.contextmanager

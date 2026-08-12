@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Iterable
 
 from . import pricing
 
@@ -121,7 +121,11 @@ def build(
     return {"models": entries}
 
 
-def validate(document: dict, registry_models: dict[str, dict]) -> None:
+def validate(
+    document: dict,
+    registry_models: dict[str, dict],
+    all_registry_ids: Iterable[str] | None = None,
+) -> None:
     """契約検証。1つでも落ちたら古いcatalogを維持する。"""
     models = document.get("models")
     if not isinstance(models, list) or not models:
@@ -136,6 +140,10 @@ def validate(document: dict, registry_models: dict[str, dict]) -> None:
     missing = expected - present
     if missing:
         raise CatalogError(f"OpenRouterモデルが欠落しています: {sorted(missing)}")
+    if all_registry_ids is not None:
+        extra = (set(slugs) & set(all_registry_ids)) - expected
+        if extra:
+            raise CatalogError(f"profile外のOpenRouterモデルがあります: {sorted(extra)}")
 
     natives = [model for model in models if model.get("slug") not in expected]
     if not natives:
@@ -174,14 +182,17 @@ def generate(
     registry_path: Path,
     output: Path,
     price_state: Path | None = None,
+    model_ids: Iterable[str] | None = None,
 ) -> Path:
     """取得 → 価格解決 → 組み立て → 契約検証 → 原子的置換。
 
     価格取得が失敗してもregistryのfallbackへ倒れるので、ここは止まらない。
     """
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    registry_models = registry["models"]
+    all_models = registry["models"]
+    selected = tuple(model_ids) if model_ids is not None else tuple(all_models)
+    registry_models = {model: all_models[model] for model in selected}
     prices = pricing.resolve(registry, price_state)
     document = build(bundled_models(codex, codex_home), registry_models, prices, registry)
-    validate(document, registry_models)
+    validate(document, registry_models, all_models)
     return write(document, output)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -124,6 +125,65 @@ class BlockTests(unittest.TestCase):
         )
         self.assertIn("/new.json", text)
         self.assertNotIn("/old.json", text)
+
+
+class ManagedConfigTests(unittest.TestCase):
+    PROVIDER = """[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "http://127.0.0.1:0/v1"
+wire_api = "responses"
+"""
+
+    def test_active_blocks_are_rebuilt_without_nesting(self):
+        provider_only = configblock.insert_block(
+            LIVE_CONFIG, "provider", self.PROVIDER, top_level=False
+        )
+        active = configblock.render_managed(
+            provider_only,
+            provider_body=self.PROVIDER.replace(":0/", ":49152/"),
+            catalog_body='model_catalog_json = "/tmp/catalog.json"',
+        )
+        parsed = tomllib.loads(active)
+        self.assertEqual(parsed["model_catalog_json"], "/tmp/catalog.json")
+        self.assertEqual(
+            parsed["model_providers"]["openrouter"]["base_url"],
+            "http://127.0.0.1:49152/v1",
+        )
+        self.assertLess(active.index("model_catalog_json"), active.index("[shell_environment_policy]"))
+        self.assertLess(active.index("model_catalog_json"), active.index("[model_providers.openrouter]"))
+
+    def test_inactive_removes_catalog_and_keeps_stub(self):
+        active = configblock.render_managed(
+            LIVE_CONFIG,
+            provider_body=self.PROVIDER.replace(":0/", ":49152/"),
+            catalog_body='model_catalog_json = "/tmp/catalog.json"',
+        )
+        inactive = configblock.render_managed(active, provider_body=self.PROVIDER)
+        parsed = tomllib.loads(inactive)
+        self.assertNotIn("model_catalog_json", parsed)
+        self.assertEqual(
+            parsed["model_providers"]["openrouter"]["base_url"],
+            "http://127.0.0.1:0/v1",
+        )
+
+    def test_unmarked_provider_conflict_is_rejected(self):
+        conflicting = LIVE_CONFIG + "\n[model_providers.openrouter]\nname = \"mine\"\n"
+        with self.assertRaises(configblock.ConfigBlockError):
+            configblock.render_managed(conflicting, provider_body=self.PROVIDER)
+
+    def test_unmarked_catalog_conflict_is_rejected(self):
+        conflicting = 'model_catalog_json = "/mine.json"\n' + LIVE_CONFIG
+        with self.assertRaises(configblock.ConfigBlockError):
+            configblock.render_managed(conflicting, provider_body=self.PROVIDER)
+
+    def test_duplicate_or_broken_marker_is_rejected(self):
+        broken = LIVE_CONFIG + "\n# >>> codex-openrouter:provider >>>\n"
+        with self.assertRaises(configblock.ConfigBlockError):
+            configblock.render_managed(broken, provider_body=self.PROVIDER)
+
+    def test_invalid_toml_is_rejected(self):
+        with self.assertRaises(configblock.ConfigBlockError):
+            configblock.render_managed("model = [\n", provider_body=self.PROVIDER)
 
 
 class EditTests(unittest.TestCase):

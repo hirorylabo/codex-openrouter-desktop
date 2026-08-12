@@ -18,6 +18,19 @@ from codex_openrouter import upgrade as upgrade_module
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_current_docs_have_no_retired_v01_commands_or_assets(self) -> None:
+        texts = "\n".join(
+            (ROOT / name).read_text(encoding="utf-8")
+            for name in ("README.md", "README.en.md", "SECURITY.md", "CONTRIBUTING.md")
+        )
+        for retired in (
+            "portable/patcher-js",
+            "adapters/index.json",
+            "codex-openrouter update",
+            "creates a dedicated local clone",
+        ):
+            self.assertNotIn(retired, texts)
+
     def test_no_packaged_secrets_apps_asar_or_runtime_databases(self) -> None:
         forbidden_suffixes = {".asar", ".db", ".sqlite", ".sqlite3"}
         forbidden_names = {"auth.json", ".env", "Cookies", "Login Data"}
@@ -202,6 +215,7 @@ class RepositoryTests(unittest.TestCase):
         upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
         self.assertIn("CodexLauncherLog", upgrade)
         self.assertIn('state_dir / "logs/launcher.log"', upgrade)
+        self.assertIn('run([str(paths.credential_helper), "status"])', upgrade)
 
     def test_progress_sentinels_match_between_swift_and_python(self) -> None:
         """HUDの出し入れは文字列の一致が全て。片方だけ変えると黙って出なくなる。"""

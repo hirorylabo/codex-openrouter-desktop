@@ -23,12 +23,14 @@ import subprocess
 import tempfile
 
 from . import __version__
-from .app import UserPaths, detect_stock
+from .app import UserPaths, assert_apple_silicon, detect_stock
 from .auth import CredentialStore
+from . import configblock
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
-from .profile import resolve_profile
+from .profile import ResolvedProfile, resolve_profile, select_profile_path
 from .promotion import atomic_promote
+from .supervisor import State, Supervisor, provider_block_body
 
 
 class UpgradeError(RuntimeError):
@@ -117,6 +119,7 @@ def manifest_document(
     stock,
     workspace: Path,
     source_commit: str,
+    profile_digest: str,
 ) -> dict:
     """install-manifest.json の中身。installとupgradeで同じ物を書く。
 
@@ -127,13 +130,14 @@ def manifest_document(
     永久に「変化なし」と判定される。
     """
     document = {
-        "schema_version": 4,
+        "schema_version": 5,
         "release_version": __version__,
         "source_commit": source_commit,
         "chatgpt_version": stock.version,
         "chatgpt_build": stock.build,
         "workspace": str(workspace),
         "mode": "loopback-guard",
+        "profile_digest": profile_digest,
     }
     if source_root != paths.support_root:
         document["source_root"] = str(source_root)
@@ -200,44 +204,43 @@ def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: P
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(target)])
 
 
-def upgrade(
+def selected_profile(
     source_root: Path,
     paths: UserPaths,
-    profile_argument: str,
-    *,
-    network_check: bool = True,
-) -> int:
-    if not paths.bin_dir.is_dir():
-        raise UpgradeError("既存installationがありません。先にsetupを実行してください")
-    if process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"):
-        raise UpgradeError("ChatGPT.appを終了してからupgradeしてください")
-    stock = detect_stock(paths.stock_app)
-
-    profile_path = (
-        source_root / "profiles/default.json"
-        if profile_argument == "default"
-        else Path(profile_argument).expanduser().resolve()
+    argument: str | None,
+) -> tuple[Path, ResolvedProfile]:
+    path = select_profile_path(
+        argument=argument,
+        source_default=source_root / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
     )
-    profile = resolve_profile(source_root / "models/registry.json", profile_path)
-    # runtimeファイルの入れ替えに実課金のAPI往復は要らない。自動経路では外す。
-    if network_check:
-        key = CredentialStore(paths.credential_helper).get()
-        print("INFO: upgrade検証は少量のOpenRouter API利用料が発生する場合があります。")
-        metadata = validate_key_and_profile(key, set(profile.models))
-        if metadata.get("limit") is None:
-            print("WARNING: API keyのspend limitが未設定です。")
+    return path, resolve_profile(source_root / "models/registry.json", path)
+
+
+def promote_runtime(
+    source_root: Path,
+    paths: UserPaths,
+    stock,
+    workspace: Path,
+    profile: ResolvedProfile,
+) -> Path:
+    """setup/upgrade共通のstaging・検証・atomic promotion。"""
+    if paths.shared_config.is_file():
+        # marker外衝突や壊れたTOMLは、何も置換する前に停止する。
+        configblock.render_managed(
+            paths.shared_config.read_text(encoding="utf-8"),
+            provider_body=provider_block_body(0),
+        )
 
     python = shutil.which("python3") or "/usr/bin/python3"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_root = paths.state_dir / "upgrade-backups" / f"{timestamp}-v{__version__}"
-    workspace = paths.home / "Documents"
-    receipt = paths.state_dir / "install-manifest.json"
-    if receipt.is_file() and not receipt.is_symlink():
-        saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
-        if isinstance(saved, str) and Path(saved).is_dir():
-            workspace = Path(saved)
+    for directory in (paths.bin_dir, paths.state_dir, paths.support_root.parent):
+        directory.mkdir(parents=True, exist_ok=True)
+    paths.state_dir.chmod(0o700)
 
-    with tempfile.TemporaryDirectory(prefix="codex-openrouter-upgrade-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="codex-openrouter-deploy-") as temporary:
         stage = Path(temporary).resolve()
         stage_support = stage / "support"
         stage_bin = stage / "bin"
@@ -257,6 +260,7 @@ def upgrade(
                 str(credential),
             ]
         )
+        # 一時helperで保存済みのKeychain itemを、staged helperで確認する。
         run([str(credential), "status"])
 
         commit_result = subprocess.run(
@@ -270,9 +274,25 @@ def upgrade(
             if commit_result.returncode == 0 and commit_result.stdout.strip()
             else "release-archive"
         )
+        _write_json(stage_state / "profile.json", profile.as_json())
+        state = State.load(paths.supervisor_state)
+        if state.profile_digest != profile.digest:
+            state.pending_default_model = True
+        state.profile_digest = profile.digest
+        state.active = False
+        state.guard_port = None
+        state.guard_nonce = None
+        state.save(stage_state / "supervisor.json")
         _write_json(
             stage_state / "install-manifest.json",
-            manifest_document(source_root, paths, stock, workspace, source_commit),
+            manifest_document(
+                source_root,
+                paths,
+                stock,
+                workspace,
+                source_commit,
+                profile.digest,
+            ),
         )
 
         shutil.copy2(source_root / "codex-openrouter", stage_bin / "codex-openrouter")
@@ -287,32 +307,71 @@ def upgrade(
                 paths.home,
                 python,
             )
-        run(
-            [
-                python,
-                "-m",
-                "py_compile",
-                str(stage_bin / "codex-openrouter-doctor"),
-            ]
-        )
+        run([python, "-m", "py_compile", str(stage_bin / "codex-openrouter-doctor")])
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
-
         build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")
 
         replacements: list[tuple[Path, Path]] = [(stage_support, paths.support_root)]
         replacements.extend((stage_bin / name, paths.bin_dir / name) for name in BINARIES)
-        replacements.append((stage_launcher, paths.desktop_launcher))
-        replacements.append(
-            (stage_state / "install-manifest.json", paths.state_dir / "install-manifest.json")
+        replacements.extend(
+            (
+                (stage_launcher, paths.desktop_launcher),
+                (stage_state / "install-manifest.json", paths.state_dir / "install-manifest.json"),
+                (stage_state / "profile.json", paths.installed_profile),
+                (stage_state / "supervisor.json", paths.supervisor_state),
+            )
         )
 
         def verify_live() -> None:
+            run([str(paths.credential_helper), "status"])
+            if paths.shared_config.is_file():
+                Supervisor(
+                    paths,
+                    paths.support_root / "models/registry.json",
+                    profile=profile,
+                ).self_heal()
             environment = {**os.environ, "PYTHONPATH": str(paths.support_root / "src")}
-            run([str(paths.bin_dir / "codex-openrouter-doctor"), "--secret-scan"], environment=environment)
+            run(
+                [str(paths.bin_dir / "codex-openrouter-doctor"), "--secret-scan"],
+                environment=environment,
+            )
             if detect_stock(paths.stock_app) != stock:
-                raise UpgradeError("upgrade中にstock appが変化しました")
+                raise UpgradeError("導入中にstock appが変化しました")
 
         atomic_promote(replacements, backup_root, verify_live)
+    return backup_root
+
+
+def upgrade(
+    source_root: Path,
+    paths: UserPaths,
+    profile_argument: str | None = None,
+    *,
+    network_check: bool = True,
+) -> int:
+    assert_apple_silicon()
+    if not paths.bin_dir.is_dir():
+        raise UpgradeError("既存installationがありません。先にsetupを実行してください")
+    if process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"):
+        raise UpgradeError("ChatGPT.appを終了してからupgradeしてください")
+    stock = detect_stock(paths.stock_app)
+    _profile_path, profile = selected_profile(source_root, paths, profile_argument)
+    # runtimeファイルの入れ替えに実課金のAPI往復は要らない。自動経路では外す。
+    if network_check:
+        key = CredentialStore(paths.credential_helper).get()
+        print("INFO: upgrade検証は少量のOpenRouter API利用料が発生する場合があります。")
+        metadata = validate_key_and_profile(key, set(profile.models))
+        if metadata.get("limit") is None:
+            print("WARNING: API keyのspend limitが未設定です。")
+
+    workspace = paths.home / "Documents"
+    receipt = paths.state_dir / "install-manifest.json"
+    if receipt.is_file() and not receipt.is_symlink():
+        saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
+        if isinstance(saved, str) and Path(saved).is_dir():
+            workspace = Path(saved)
+
+    backup_root = promote_runtime(source_root, paths, stock, workspace, profile)
     print(f"UPGRADE: PASS v{__version__} mode=loopback-guard")
     print(f"rollback backup: {backup_root}")
     return 0
@@ -331,7 +390,7 @@ def _selfupdate_state(path: Path) -> dict:
     return document if isinstance(document, dict) else {}
 
 
-def auto_upgrade(paths: UserPaths, profile_argument: str = "default") -> int:
+def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
     """クリック起動の前段。差分があるときだけupgradeする。
 
     **失敗しても0を返す。** 起動そのものは止めない。promotionのverifyが落ちれば

@@ -10,14 +10,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from codex_openrouter import configblock, doctor as doctor_module, guard as guard_module  # noqa: E402
-from codex_openrouter.supervisor import CATALOG_BLOCK, PROVIDER_BLOCK  # noqa: E402
+from codex_openrouter.supervisor import (  # noqa: E402
+    CATALOG_BLOCK,
+    PROVIDER_BLOCK,
+    State,
+    provider_block_body,
+)
 from tests_support import make_paths  # noqa: E402
 
 REGISTRY = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"))["models"]
 OR_SLUG = next(iter(REGISTRY))
 
 BASE_CONFIG = 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "low"\n'
-PROVIDER_BODY = '[model_providers.openrouter]\nname = "OpenRouter"'
+PROVIDER_BODY = provider_block_body(0)
 CATALOG_BODY = 'model_catalog_json = "/tmp/x.json"'
 
 
@@ -37,7 +42,7 @@ class DoctorTestCase(unittest.TestCase):
 
 class ConfigCheckTests(DoctorTestCase):
     def test_missing_provider_block_is_a_failure(self):
-        doctor_module.check_config(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_config(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(
             any("provider block" in f for f in self.doctor.failures), self.doctor.failures
         )
@@ -46,7 +51,7 @@ class ConfigCheckTests(DoctorTestCase):
         self.write_config(
             configblock.insert_block(BASE_CONFIG, PROVIDER_BLOCK, PROVIDER_BODY, top_level=False)
         )
-        doctor_module.check_config(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_config(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertEqual(self.doctor.failures, [])
 
     def test_openrouter_model_without_catalog_block_is_a_failure(self):
@@ -57,7 +62,7 @@ class ConfigCheckTests(DoctorTestCase):
         text = configblock.upsert_top_level(text, "model", OR_SLUG)
         text = configblock.upsert_top_level(text, "model_provider", "openrouter")
         self.write_config(text)
-        doctor_module.check_config(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_config(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(any("catalog" in f for f in self.doctor.failures), self.doctor.failures)
 
     def test_provider_inconsistent_with_model_is_a_failure(self):
@@ -68,7 +73,7 @@ class ConfigCheckTests(DoctorTestCase):
         # nativeモデルなのにopenrouterへ向いている。
         text = configblock.upsert_top_level(text, "model_provider", "openrouter")
         self.write_config(text)
-        doctor_module.check_config(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_config(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(any("矛盾" in f for f in self.doctor.failures), self.doctor.failures)
 
     def test_key_in_config_is_a_failure(self):
@@ -76,19 +81,19 @@ class ConfigCheckTests(DoctorTestCase):
             BASE_CONFIG, PROVIDER_BLOCK, PROVIDER_BODY, top_level=False
         )
         self.write_config(text + '\napi_key = "sk-or-v1-abcdefghijklmnop"\n')
-        doctor_module.check_config(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_config(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(any("key" in f for f in self.doctor.failures), self.doctor.failures)
 
 
 class CatalogCheckTests(DoctorTestCase):
     def test_missing_catalog_is_a_warning_not_a_failure(self):
-        doctor_module.check_catalog(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_catalog(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertEqual(self.doctor.failures, [])
 
     def test_broken_catalog_is_a_failure(self):
         self.paths.composite_catalog.parent.mkdir(parents=True, exist_ok=True)
         self.paths.composite_catalog.write_text('{"models": []}', encoding="utf-8")
-        doctor_module.check_catalog(self.doctor, self.paths, REGISTRY)
+        doctor_module.check_catalog(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(self.doctor.failures)
 
 
@@ -124,17 +129,27 @@ class SecretScanTests(DoctorTestCase):
 
 class GuardCheckTests(DoctorTestCase):
     def test_free_port_is_reported_as_stopped(self):
-        port = guard_module.free_port()
-        doctor_module.check_guard(self.doctor, self.paths, port=port)
+        doctor_module.check_guard(self.doctor, self.paths)
         self.assertEqual(self.doctor.failures, [])
 
     def test_running_guard_passes(self):
-        instance = guard_module.Guard(REGISTRY, key_provider=lambda: "k", nonce="n")
+        instance = guard_module.Guard(
+            REGISTRY, key_provider=lambda: "k", nonce="n", access_token="local"
+        )
         server, port = guard_module.serve(instance)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        doctor_module.check_guard(self.doctor, self.paths, port=port)
+        State(active=True, guard_port=port, guard_nonce="n").save(self.paths.supervisor_state)
+        doctor_module.check_guard(self.doctor, self.paths)
         self.assertEqual(self.doctor.failures, [])
+
+    def test_active_state_without_listener_is_a_failure(self):
+        port = guard_module.free_port()
+        State(active=True, guard_port=port, guard_nonce="n").save(
+            self.paths.supervisor_state
+        )
+        doctor_module.check_guard(self.doctor, self.paths)
+        self.assertTrue(self.doctor.failures)
 
     def test_foreign_listener_on_the_port_is_a_failure(self):
         import socketserver
@@ -150,7 +165,10 @@ class GuardCheckTests(DoctorTestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        doctor_module.check_guard(self.doctor, self.paths, port=port)
+        State(active=True, guard_port=port, guard_nonce="ours").save(
+            self.paths.supervisor_state
+        )
+        doctor_module.check_guard(self.doctor, self.paths)
         self.assertTrue(self.doctor.failures)
 
 

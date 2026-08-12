@@ -45,7 +45,7 @@ rotate_log "$LAUNCHER_LOG"
 (umask 077 && : >> "$LAUNCHER_LOG")
 /bin/chmod 600 "$LAUNCHER_LOG"
 
-# 鍵はKeychain helper経由でのみ渡る。shellのsecretは継がせない。
+# 実鍵はguardだけがKeychain helperから取得する。shellのsecretは継がせない。
 unset OPENROUTER_API_KEY CODEX_ACCESS_TOKEN
 
 # 導入元に差分があればここで反映する。端末でupgradeを打たなくて済むように。

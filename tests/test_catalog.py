@@ -138,6 +138,12 @@ class ValidateTests(unittest.TestCase):
     def test_rejects_empty_document(self):
         self._expect_error({"models": []})
 
+    def test_rejects_models_outside_the_installed_profile(self):
+        selected_slug = next(iter(REGISTRY))
+        selected = {selected_slug: REGISTRY[selected_slug]}
+        with self.assertRaises(catalog.CatalogError):
+            catalog.validate(self.document, selected, REGISTRY)
+
 
 class WriteTests(unittest.TestCase):
     def test_write_is_atomic_and_keeps_one_generation(self):

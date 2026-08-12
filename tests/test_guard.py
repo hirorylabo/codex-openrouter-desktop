@@ -48,6 +48,7 @@ class GuardTestCase(unittest.TestCase):
             log_path=self.log,
             forwarder=self.forwarder,
             nonce="test-nonce",
+            access_token="local-token",
         )
         self.server, self.port = guard_module.serve(self.guard)
         self.addCleanup(self.server.server_close)
@@ -58,13 +59,20 @@ class GuardTestCase(unittest.TestCase):
             f"http://127.0.0.1:{self.port}/v1/responses",
             data=json.dumps(document).encode("utf-8"),
             method="POST",
-            headers={"Content-Type": "application/json", "Connection": "close"},
+            headers={
+                "Authorization": "Bearer local-token",
+                "Content-Type": "application/json",
+                "Connection": "close",
+            },
         )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as error:
-            return error.code, error.read()
+            try:
+                return error.code, error.read()
+            finally:
+                error.close()
 
     def log_records(self) -> list[dict]:
         if not self.log.exists():
@@ -102,6 +110,25 @@ class AllowlistTests(GuardTestCase):
         for slug in registry:
             self.assertTrue(allowing.allows(slug))
         self.assertFalse(allowing.allows(COLLATERAL))
+
+    def test_missing_local_auth_is_rejected_before_forwarding(self):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/v1/responses",
+            data=json.dumps(
+                {"model": "deepseek/deepseek-v4-pro", "input": "must-not-be-read"}
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        try:
+            urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            self.assertEqual(error.code, 401)
+            error.close()
+        else:
+            self.fail("unauthenticated request unexpectedly succeeded")
+        self.assertEqual(self.forwarder.calls, [])
+        self.assertEqual(self.log_records(), [])
 
 
 class LoggingTests(GuardTestCase):
@@ -221,6 +248,7 @@ class StreamingRelayTests(unittest.TestCase):
             allowed_models=ALLOWED,
             key_provider=lambda: "sk-or-test-key",
             nonce="test-nonce",
+            access_token="local-token",
         )
         self.server, self.port = guard_module.serve(guard)
         self.addCleanup(self.server.server_close)
@@ -232,7 +260,11 @@ class StreamingRelayTests(unittest.TestCase):
             f"http://127.0.0.1:{self.port}/v1/responses",
             data=json.dumps({"model": "z-ai/glm-5.2", "input": "hi"}).encode("utf-8"),
             method="POST",
-            headers={"Content-Type": "application/json", "Connection": "close"},
+            headers={
+                "Authorization": "Bearer local-token",
+                "Content-Type": "application/json",
+                "Connection": "close",
+            },
         )
         started = time.monotonic()
         with urllib.request.urlopen(request, timeout=30) as response:

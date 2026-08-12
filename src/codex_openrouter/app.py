@@ -68,6 +68,18 @@ class UserPaths:
     def guard_log(self) -> Path:
         return self.state_dir / "guard.log"
 
+    @property
+    def installed_profile(self) -> Path:
+        return self.state_dir / "profile.json"
+
+    @property
+    def supervisor_state(self) -> Path:
+        return self.state_dir / "supervisor.json"
+
+    @property
+    def guard_token(self) -> Path:
+        return self.state_dir / "guard-token"
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()

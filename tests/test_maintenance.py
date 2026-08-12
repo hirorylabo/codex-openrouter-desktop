@@ -87,6 +87,28 @@ class PromotionTests(unittest.TestCase):
             self.assertEqual("failed-auto-rolled-back", report["result"])
             self.assertEqual(2, len(list((backup / "failed-new").iterdir())))
 
+    def test_manual_rollback_removes_targets_that_were_new_in_the_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / "staged-profile.json"
+            live = root / "profile.json"
+            staged.write_text("new-profile", encoding="utf-8")
+            upgrade_backup = root / "upgrade-backup"
+            atomic_promote([(staged, live)], upgrade_backup, lambda: None)
+            self.assertEqual("new-profile", live.read_text())
+
+            rollback_backup = root / "rollback-backup"
+            replacements = rollback_replacements(upgrade_backup)
+            self.assertEqual([(None, live)], replacements)
+            atomic_promote(replacements, rollback_backup, lambda: self.assertFalse(live.exists()))
+            self.assertFalse(live.exists())
+            # rollback自体も元へ戻せる。
+            atomic_promote(
+                rollback_replacements(rollback_backup),
+                root / "undo-rollback",
+                lambda: self.assertEqual("new-profile", live.read_text()),
+            )
+
 
 def _source_tree(root: Path) -> Path:
     """copy_support が運ぶ形の最小ツリーを作る。"""
@@ -157,7 +179,7 @@ class AutoUpgradeTests(unittest.TestCase):
             state_dir=self.state,
         )
         self.receipt = self.state / "install-manifest.json"
-        self.write_receipt({"schema_version": 4, "source_root": str(self.source)})
+        self.write_receipt({"schema_version": 5, "source_root": str(self.source)})
 
     def write_receipt(self, document: dict) -> None:
         self.receipt.write_text(json.dumps(document), encoding="utf-8")
@@ -180,14 +202,14 @@ class AutoUpgradeTests(unittest.TestCase):
         self.assertEqual(self.source, upgrade_call.call_args.args[0])
 
     def test_unrecorded_source_root_is_skipped(self) -> None:
-        self.write_receipt({"schema_version": 4})
+        self.write_receipt({"schema_version": 5})
         self.change_source()
         with mock.patch.object(upgrade_module, "upgrade") as upgrade_call:
             self.assertEqual(0, upgrade_module.auto_upgrade(self.paths))
         upgrade_call.assert_not_called()
 
     def test_missing_source_root_does_not_break_the_launch(self) -> None:
-        self.write_receipt({"schema_version": 4, "source_root": str(self.home / "gone")})
+        self.write_receipt({"schema_version": 5, "source_root": str(self.home / "gone")})
         with mock.patch.object(upgrade_module, "upgrade") as upgrade_call:
             self.assertEqual(0, upgrade_module.auto_upgrade(self.paths))
         upgrade_call.assert_not_called()
@@ -195,7 +217,7 @@ class AutoUpgradeTests(unittest.TestCase):
     def test_source_root_outside_home_is_refused(self) -> None:
         outside = Path(self.directory.name) / "elsewhere"
         _source_tree(outside)
-        self.write_receipt({"schema_version": 4, "source_root": str(outside)})
+        self.write_receipt({"schema_version": 5, "source_root": str(outside)})
         with mock.patch.object(upgrade_module, "upgrade") as upgrade_call:
             self.assertEqual(0, upgrade_module.auto_upgrade(self.paths))
         upgrade_call.assert_not_called()
@@ -226,13 +248,15 @@ class AutoUpgradeTests(unittest.TestCase):
     def test_manifest_omits_source_root_when_it_is_the_installed_tree(self) -> None:
         stock = mock.Mock(version="26.803", build="6396")
         document = upgrade_module.manifest_document(
-            self.support, self.paths, stock, self.home, "abc123"
+            self.support, self.paths, stock, self.home, "abc123", "profile-digest"
         )
         self.assertNotIn("source_root", document)
         recorded = upgrade_module.manifest_document(
-            self.source, self.paths, stock, self.home, "abc123"
+            self.source, self.paths, stock, self.home, "abc123", "profile-digest"
         )
         self.assertEqual(str(self.source), recorded["source_root"])
+        self.assertEqual(5, recorded["schema_version"])
+        self.assertEqual("profile-digest", recorded["profile_digest"])
 
 
 if __name__ == "__main__":

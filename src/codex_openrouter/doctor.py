@@ -18,6 +18,7 @@ import re
 import socket
 import subprocess
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,7 +27,8 @@ from . import catalog as catalog_module
 from . import configblock
 from .app import UserPaths
 from .auth import CredentialStore
-from .supervisor import CATALOG_BLOCK, DEFAULT_PORT, PROVIDER_BLOCK
+from .profile import resolve_profile, select_profile_path
+from .supervisor import CATALOG_BLOCK, PROVIDER_BLOCK, State
 
 ENDPOINT = "https://openrouter.ai/api/v1/responses"
 KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_\-]{8,}")
@@ -146,13 +148,23 @@ def check_stock(doctor: Doctor, paths: UserPaths) -> None:
     )
 
 
-def check_config(doctor: Doctor, paths: UserPaths, registry_models: dict) -> None:
+def check_config(
+    doctor: Doctor,
+    paths: UserPaths,
+    registry_models: dict,
+    all_registry_models: set[str],
+) -> None:
     config = paths.shared_config
     if not doctor.expect(
         config.is_file(), f"共有configがあります: {config}", f"共有configがありません: {config}"
     ):
         return
     text = config.read_text(encoding="utf-8")
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        doctor.fail(f"共有configが不正なTOMLです: {exc}")
+        return
 
     # B block は永続。消すとOpenRouter記録threadのresumeがハードエラーになる。
     doctor.expect(
@@ -162,14 +174,68 @@ def check_config(doctor: Doctor, paths: UserPaths, registry_models: dict) -> Non
     )
     model = configblock.read_top_level(text, "model")
     provider = configblock.read_top_level(text, "model_provider")
-    if configblock.has_block(text, CATALOG_BLOCK):
+    active = configblock.has_block(text, CATALOG_BLOCK)
+    state = State.load(paths.supervisor_state)
+    provider_root = document.get("model_providers")
+    provider_table = (
+        provider_root.get("openrouter") if isinstance(provider_root, dict) else None
+    )
+    if not isinstance(provider_table, dict):
+        doctor.fail("model_providers.openrouterをTOMLとして解釈できません")
+        return
+    base_url = provider_table.get("base_url")
+    auth = provider_table.get("auth")
+    if not isinstance(auth, dict):
+        doctor.fail("model_providers.openrouter.authがありません")
+        return
+
+    if active:
         doctor.ok("catalog blockがあります（ランチャー実行中）")
+        expected_url = (
+            f"http://127.0.0.1:{state.guard_port}/v1" if state.guard_port else None
+        )
+        doctor.expect(
+            state.active and state.guard_port not in (None, 0),
+            f"supervisor stateはactiveです（port {state.guard_port}）",
+            "catalogがあるのにsupervisor stateがactiveではありません",
+        )
+        doctor.expect(
+            base_url == expected_url,
+            "active providerは実行中guardのephemeral portを指しています",
+            f"active providerとguard portが一致しません: {base_url} != {expected_url}",
+        )
+        doctor.expect(
+            auth.get("command") == "/bin/cat" and auth.get("args") == [str(paths.guard_token)],
+            "active providerは起動ごとのローカルtokenで認証します",
+            "active providerがローカルtoken認証ではありません",
+        )
+        doctor.expect(
+            paths.guard_token.is_file()
+            and paths.guard_token.stat().st_mode & 0o777 == 0o600,
+            "guard tokenは0600で存在します",
+            "activeなのにguard tokenが無いかmodeが0600ではありません",
+        )
     else:
         doctor.ok("catalog blockはありません（純正起動はvanilla）")
         doctor.expect(
-            model not in registry_models,
+            model not in all_registry_models,
             "非稼働時のmodelはnativeです",
             f"catalogが無いのにmodelがOpenRouter slugです: {model}",
+        )
+        doctor.expect(
+            not state.active and base_url == "http://127.0.0.1:0/v1",
+            "inactive providerは非接続stubです",
+            f"inactive providerが非接続stubではありません: {base_url}",
+        )
+        doctor.expect(
+            auth.get("command") == "/usr/bin/false" and auth.get("args") == [],
+            "inactive providerの認証は必ず失敗します",
+            "inactive providerの認証がfail-closedではありません",
+        )
+        doctor.expect(
+            not paths.guard_token.exists(),
+            "inactive時にguard tokenは残っていません",
+            f"inactive時にguard tokenが残っています: {paths.guard_token}",
         )
     expected = "openrouter" if model in registry_models else "openai"
     doctor.expect(
@@ -182,16 +248,26 @@ def check_config(doctor: Doctor, paths: UserPaths, registry_models: dict) -> Non
         "configにOpenRouter keyはありません",
         "configにOpenRouter keyが書かれています",
     )
+    doctor.expect(
+        str(paths.credential_helper) not in text,
+        "provider認証は実API key helperを参照しません",
+        "provider認証が実API key helperを参照しています",
+    )
 
 
-def check_catalog(doctor: Doctor, paths: UserPaths, registry_models: dict) -> None:
+def check_catalog(
+    doctor: Doctor,
+    paths: UserPaths,
+    registry_models: dict,
+    all_registry_models: set[str],
+) -> None:
     path = paths.composite_catalog
     if not path.is_file():
         doctor.warn(f"compositeカタログはまだありません（初回起動時に生成されます）: {path}")
         return
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-        catalog_module.validate(document, registry_models)
+        catalog_module.validate(document, registry_models, all_registry_models)
     except (json.JSONDecodeError, catalog_module.CatalogError) as exc:
         doctor.fail(f"compositeカタログが契約を満たしません: {exc}")
         return
@@ -199,13 +275,26 @@ def check_catalog(doctor: Doctor, paths: UserPaths, registry_models: dict) -> No
     doctor.ok(f"compositeカタログは契約を満たします（picker表示 {len(listed)}件）")
 
 
-def check_guard(doctor: Doctor, paths: UserPaths, port: int = DEFAULT_PORT) -> None:
+def check_guard(doctor: Doctor, paths: UserPaths) -> None:
+    state = State.load(paths.supervisor_state)
+    if not state.active:
+        doctor.ok("supervisorはinactiveです（guard検査対象なし）")
+        return
+    if (
+        not isinstance(state.guard_port, int)
+        or not 1 <= state.guard_port <= 65535
+        or not isinstance(state.guard_nonce, str)
+        or not state.guard_nonce
+    ):
+        doctor.fail("active stateにguard port/nonceがありません")
+        return
+    port = state.guard_port
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.settimeout(1.0)
     listening = probe.connect_ex(("127.0.0.1", port)) == 0
     probe.close()
     if not listening:
-        doctor.ok(f"guardは停止中でport {port} は空いています")
+        doctor.fail(f"active stateなのにguardがport {port}で応答していません")
         return
     try:
         with urllib.request.urlopen(
@@ -216,7 +305,7 @@ def check_guard(doctor: Doctor, paths: UserPaths, port: int = DEFAULT_PORT) -> N
         doctor.fail(f"port {port} を別のプロセスが使用しています。guardを起動できません")
         return
     doctor.expect(
-        document.get("ok") is True,
+        document.get("ok") is True and document.get("nonce") == state.guard_nonce,
         f"guardがport {port} で応答しています",
         f"port {port} の応答がguardのものではありません",
     )
@@ -327,11 +416,29 @@ def run(
     runtime: bool = False,
     secret_scan: bool = False,
 ) -> int:
-    registry_models = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
+    profile_path = select_profile_path(
+        argument=None,
+        source_default=registry_path.parent.parent / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
+    )
+    profile = resolve_profile(registry_path, profile_path)
+    registry_models = profile.registry
     doctor = Doctor()
     check_stock(doctor, paths)
-    check_config(doctor, paths, registry_models)
-    check_catalog(doctor, paths, registry_models)
+    state = State.load(paths.supervisor_state)
+    digest_matches = state.profile_digest == profile.digest
+    legacy_without_installed_profile = (
+        not paths.installed_profile.exists() and state.profile_digest is None
+    )
+    doctor.expect(
+        digest_matches or legacy_without_installed_profile,
+        f"導入済みprofile digestは一致します: {profile.name}",
+        "supervisor stateと導入済みprofileが一致しません",
+    )
+    check_config(doctor, paths, registry_models, set(registry))
+    check_catalog(doctor, paths, registry_models, set(registry))
     if runtime:
         check_guard(doctor, paths)
     if secret_scan:

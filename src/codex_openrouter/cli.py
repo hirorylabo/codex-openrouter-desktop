@@ -20,7 +20,7 @@ from .auth import (
 from . import configblock
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
-from .profile import ProfileError, ResolvedProfile, resolve_profile
+from .profile import ProfileError, ResolvedProfile, resolve_profile, select_profile_path
 
 
 class CliError(RuntimeError):
@@ -34,19 +34,16 @@ def root() -> Path:
     return Path(value).resolve()
 
 
-def profile_path(argument: str, paths: UserPaths) -> Path:
-    if argument != "default":
-        path = Path(argument).expanduser().resolve()
-    elif (paths.codex_home / "profile.json").is_file():
-        path = paths.codex_home / "profile.json"
-    else:
-        path = root() / "profiles/default.json"
-    if not path.is_file() or path.is_symlink():
-        raise CliError(f"profileが見つからないかsymlinkです: {path}")
-    return path
+def profile_path(argument: str | None, paths: UserPaths) -> Path:
+    return select_profile_path(
+        argument=argument,
+        source_default=root() / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
+    )
 
 
-def resolved_profile(argument: str, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
+def resolved_profile(argument: str | None, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
     selected = profile_path(argument, paths)
     return selected, resolve_profile(root() / "models/registry.json", selected)
 
@@ -131,6 +128,7 @@ def setup_command(args: argparse.Namespace) -> int:
         paths,
         args.profile,
         workspace=Path(args.workspace).expanduser().resolve(),
+        network_check=False,
     )
 
 
@@ -157,7 +155,7 @@ def auth_command(args: argparse.Namespace) -> int:
             print("OpenRouter側のkey失効は https://openrouter.ai/settings/keys で行ってください。")
             return 0
 
-        _, profile = resolved_profile("default", paths)
+        _, profile = resolved_profile(None, paths)
         if args.auth_action == "rotate" and not store.exists():
             raise CliError("rotate対象のローカルcredentialがありません。auth loginを使用してください")
         key = obtain_key(args.method)
@@ -204,6 +202,18 @@ def rollback_command(_args: argparse.Namespace) -> int:
     rollback_backup = upgrade_root / f"manual-rollback-{timestamp}"
 
     def verify() -> None:
+        from .supervisor import Supervisor
+
+        registry_path = paths.support_root / "models/registry.json"
+        selected = select_profile_path(
+            argument=None,
+            source_default=paths.support_root / "profiles/default.json",
+            installed=paths.installed_profile,
+            legacy=paths.codex_home / "profile.json",
+        )
+        profile = resolve_profile(registry_path, selected)
+        if paths.shared_config.is_file():
+            Supervisor(paths, registry_path, profile=profile).self_heal()
         if subprocess.run([str(paths.bin_dir / "codex-openrouter-doctor")]).returncode != 0:
             raise CliError("復元後doctorに失敗しました")
 
@@ -220,7 +230,13 @@ def launch_command(args: argparse.Namespace) -> int:
     paths = UserPaths.current()
     assert_apple_silicon()
     workspace = Path(args.path).expanduser().resolve() if args.path else None
-    return Supervisor(paths, root() / "models/registry.json", workspace=workspace).run()
+    _selected, profile = resolved_profile(None, paths)
+    return Supervisor(
+        paths,
+        root() / "models/registry.json",
+        profile=profile,
+        workspace=workspace,
+    ).run()
 
 
 def migrate_command(args: argparse.Namespace) -> int:
@@ -229,7 +245,7 @@ def migrate_command(args: argparse.Namespace) -> int:
     旧 ~/.codex-openrouter は消さない。OpenRouterで記録した旧threadがあるため、
     読み取り専用のbackupとして残す。
     """
-    from .supervisor import DEFAULT_PORT, Supervisor
+    from .supervisor import Supervisor
 
     paths = UserPaths.current()
     actions: list[str] = []
@@ -241,8 +257,9 @@ def migrate_command(args: argparse.Namespace) -> int:
             f"{paths.shared_config} がありません。純正ChatGPT.appを一度起動してください。"
         )
 
-    supervisor = Supervisor(paths, root() / "models/registry.json")
-    supervisor.ensure_provider_block(DEFAULT_PORT)
+    _selected, profile = resolved_profile(None, paths)
+    supervisor = Supervisor(paths, root() / "models/registry.json", profile=profile)
+    supervisor.self_heal()
     actions.append("[model_providers.openrouter] を ~/.codex/config.toml へ永続化しました")
 
     if paths.openrouter_app.exists():
@@ -369,12 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     check = subcommands.add_parser("check")
-    check.add_argument("--profile", default="default")
+    check.add_argument("--profile", default=None)
     check.set_defaults(func=check_command)
 
     setup = subcommands.add_parser("setup")
     setup.add_argument("--workspace", default=str(Path.home() / "Documents"))
-    setup.add_argument("--profile", default="default")
+    setup.add_argument("--profile", default=None)
     setup.add_argument("--auth", choices=("oauth", "paste"), default="oauth")
     setup.set_defaults(func=setup_command)
 
@@ -403,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     guard_log.set_defaults(func=guard_log_command)
 
     upgrade_parser = subcommands.add_parser("upgrade")
-    upgrade_parser.add_argument("--profile", default="default")
+    upgrade_parser.add_argument("--profile", default=None)
     upgrade_parser.add_argument(
         "--if-needed",
         action="store_true",
@@ -426,7 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .install import InstallError
     from .promotion import PromotionError
+    from .supervisor import SupervisorError
     from .upgrade import UpgradeError
 
     try:
@@ -435,10 +454,13 @@ def main(argv: list[str] | None = None) -> int:
     except (
         AppError,
         AuthenticationError,
+        configblock.ConfigBlockError,
+        InstallError,
         OpenRouterError,
         ProfileError,
         ProcessError,
         PromotionError,
+        SupervisorError,
         UpgradeError,
         CliError,
         OSError,

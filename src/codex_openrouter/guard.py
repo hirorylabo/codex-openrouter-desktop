@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import hmac
 import json
 from pathlib import Path
 import socketserver
@@ -76,12 +77,14 @@ class Guard:
         log_path: Path | None = None,
         forwarder: Callable[[bytes, str], tuple[int, dict, object]] = forward_to_openrouter,
         nonce: str = "",
+        access_token: str = "",
     ):
         self.allowed = frozenset(allowed_models)
         self.key_provider = key_provider
         self.log_path = log_path
         self.forwarder = forwarder
         self.nonce = nonce
+        self.access_token = access_token
         self._lock = threading.Lock()
 
     def allows(self, model: str | None) -> bool:
@@ -138,6 +141,15 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, b'{"error":"not found"}', "application/json")
 
     def do_POST(self) -> None:
+        authorization = self.headers.get("authorization", "")
+        expected = f"Bearer {self.guard.access_token}"
+        if not self.guard.access_token or not hmac.compare_digest(authorization, expected):
+            # 認証されていないrequestの本文は読み込まない。keep-aliveで次requestの
+            # 一部として解釈しないよう、このconnectionは閉じる。
+            self.close_connection = True
+            self._send(401, b'{"error":{"message":"local guard authentication failed"}}',
+                       "application/json")
+            return
         length = int(self.headers.get("content-length") or 0)
         if length > MAX_BODY_BYTES:
             self._send(413, b'{"error":"payload too large"}', "application/json")

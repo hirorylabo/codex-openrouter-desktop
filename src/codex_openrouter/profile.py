@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,13 @@ class ResolvedProfile:
             "default_model": self.default_model,
             "default_effort": self.default_effort,
         }
+
+    @property
+    def digest(self) -> str:
+        encoded = json.dumps(
+            self.as_json(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -79,16 +87,22 @@ def resolve_profile(registry_path: Path, profile_path: Path) -> ResolvedProfile:
     )
 
 
-def render_provider_mapping(profile: ResolvedProfile) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "default_provider": "openrouter",
-        "providers": [
-            {
-                "id": "openrouter",
-                "label": "OpenRouter",
-                "description": "Dedicated OpenRouter app; API key is stored in macOS Keychain",
-            }
-        ],
-        "model_providers": {model: "openrouter" for model in profile.models},
-    }
+def select_profile_path(
+    *,
+    argument: str | None,
+    source_default: Path,
+    installed: Path,
+    legacy: Path,
+) -> Path:
+    """明示指定を優先し、省略時だけ導入済みprofileを維持する。"""
+    if argument is not None:
+        path = source_default if argument == "default" else Path(argument).expanduser().resolve()
+    elif installed.is_file() and not installed.is_symlink():
+        path = installed
+    elif legacy.is_file() and not legacy.is_symlink():
+        path = legacy
+    else:
+        path = source_default
+    if not path.is_file() or path.is_symlink():
+        raise ProfileError(f"profileが見つからないかsymlinkです: {path}")
+    return path

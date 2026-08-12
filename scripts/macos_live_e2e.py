@@ -12,6 +12,7 @@ supervisor 本体のコードをそのまま動かして検証する。
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -109,7 +111,7 @@ def main() -> int:
     helper.write_text('#!/bin/sh\n[ "$1" = "get" ] && echo "sk-or-e2e-not-a-real-key" || exit 0\n')
     helper.chmod(0o755)
 
-    supervisor = E2ESupervisor(paths, ROOT / "models/registry.json", port=8792,
+    supervisor = E2ESupervisor(paths, ROOT / "models/registry.json", port=0,
                                workspace=BASE / "ws")
     process = None
     try:
@@ -123,12 +125,37 @@ def main() -> int:
         port = supervisor.start_guard()
         check("guardが起動しhealthがnonce一致", guard_module.health_ok(port, supervisor.nonce))
         check("別nonceは拒否される", not guard_module.health_ok(port, "wrong"))
+        # 課金せず許可経路も実HTTPで通す。guard本体のforwarderだけをfixture化する。
+        supervisor._server.RequestHandlerClass.guard.forwarder = lambda _body, _key: (
+            200,
+            {"Content-Type": "text/event-stream"},
+            io.BytesIO(b"data: ok\n\n"),
+        )
+        allowed_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/responses",
+            data=json.dumps(
+                {"model": supervisor.profile.default_model, "input": "allowed-e2e"}
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": f"Bearer {supervisor.access_token}"},
+        )
+        with urllib.request.urlopen(allowed_request, timeout=10) as response:
+            check("許可modelをローカルtoken付きで中継する", response.status == 200)
 
         supervisor.apply_config(port)
         text = paths.shared_config.read_text()
         check("catalog blockが入る", configblock.has_block(text, "catalog"))
         check("provider blockが入る", configblock.has_block(text, "provider"))
         check("configに鍵が書かれていない", "sk-or-" not in text)
+        check(
+            "初回profile defaultを一度適用する",
+            configblock.read_top_level(text, "model") == supervisor.profile.default_model,
+        )
+        # 以降のnative経路を検証するため、利用者がnativeへ戻した状態を作る。
+        configblock.edit(
+            paths.shared_config,
+            lambda current: configblock.upsert_top_level(current, "model", "gpt-5.6-sol"),
+        )
         supervisor.start_watcher()
 
         # --- 起動 ---------------------------------------------------------
@@ -244,6 +271,25 @@ def main() -> int:
         check("終了後: modelがnativeへ戻る",
               configblock.read_top_level(text, "model") not in
               json.loads((ROOT / "models/registry.json").read_text())["models"])
+        check("終了後: providerはport 0のstub", "http://127.0.0.1:0/v1" in text)
+        check("終了後: guard tokenが消える", not paths.guard_token.exists())
+
+        # provider-only状態からもう一度起動し、旧nested-marker回帰を実機で検出する。
+        second = E2ESupervisor(
+            paths,
+            ROOT / "models/registry.json",
+            port=0,
+            workspace=BASE / "ws",
+        )
+        second.self_heal()
+        second_port = second.start_guard()
+        second.apply_config(second_port)
+        second_text = paths.shared_config.read_text()
+        check("2回目起動: catalog blockが再び入る", configblock.has_block(second_text, "catalog"))
+        check("2回目起動: ephemeral portを使う", f"127.0.0.1:{second_port}" in second_text)
+        second.cleanup()
+        second_text = paths.shared_config.read_text()
+        check("2回目終了: 非接続stubへ戻る", "http://127.0.0.1:0/v1" in second_text)
         # 複製したauthは必ず消す
         (paths.shared_home / "auth.json").unlink(missing_ok=True)
         check("複製したauth.jsonを削除した", not (paths.shared_home / "auth.json").exists())
