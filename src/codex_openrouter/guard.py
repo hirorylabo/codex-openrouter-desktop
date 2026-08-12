@@ -116,6 +116,8 @@ class Guard:
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # SSEを小さい書き込みで流し続けるので、送信側の遅延を持ち込まない。
+    disable_nagle_algorithm = True
     guard: Guard
 
     def log_message(self, *args) -> None:  # noqa: D401 - stderrへ出さない
@@ -180,9 +182,14 @@ class _Handler(BaseHTTPRequestHandler):
         # 長さ不明のSSEをそのまま流すためchunkedにする。
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        # `HTTPResponse.read(n)` は n バイト溜まるかレスポンス完了まで返らない
+        # （chunkedでも _read_chunked が n まで貯める）。それではSSEが 8KB 単位
+        # でしか届かず、短いturnは完了まで無反応になる。1回の下位読み出し分だけ
+        # 返す read1 を使う。forwarder は差し替え可能なので非対応なら read へ倒す。
+        read_chunk = getattr(stream, "read1", None) or stream.read
         try:
             while True:
-                chunk = stream.read(8192)
+                chunk = read_chunk(8192)
                 if not chunk:
                     break
                 self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))

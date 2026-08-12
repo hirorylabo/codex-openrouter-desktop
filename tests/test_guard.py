@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -164,6 +168,91 @@ class HealthTests(GuardTestCase):
     def test_health_on_dead_port_is_false(self):
         free = guard_module.free_port()
         self.assertFalse(guard_module.health_ok(free, "test-nonce"))
+
+
+class _SlowUpstreamHandler(BaseHTTPRequestHandler):
+    """SSEを小刻みに吐く上流。guardが貯め込まないことを見るために使う。"""
+
+    chunks = 20
+    interval = 0.1
+
+    def log_message(self, *args):
+        return
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length") or 0)
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for index in range(self.chunks):
+            payload = f"data: token {index}\n\n".encode("utf-8")
+            self.wfile.write(f"{len(payload):X}\r\n".encode("ascii"))
+            self.wfile.write(payload)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+            time.sleep(self.interval)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+
+class StreamingRelayTests(unittest.TestCase):
+    """中継経路を実HTTPResponseで通す。
+
+    他のテストは forwarder を `io.BytesIO` で差し替えるので、`read` と `read1`
+    の差が出ない。`HTTPResponse.read(n)` は n バイト溜まるかレスポンス完了まで
+    返らないため、それを使うとSSEが 8KB 単位でしか届かない（実測では総計2.0秒の
+    ストリームが完了後に一度だけ届いた）。上流を自前で立てて実測する。
+    """
+
+    def setUp(self):
+        self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), _SlowUpstreamHandler)
+        self.upstream.daemon_threads = True
+        threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
+        self.addCleanup(self.upstream.server_close)
+        self.addCleanup(self.upstream.shutdown)
+        endpoint = f"http://127.0.0.1:{self.upstream.server_address[1]}/api/v1/responses"
+        patcher = mock.patch.object(guard_module, "ENDPOINT", endpoint)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        guard = guard_module.Guard(
+            allowed_models=ALLOWED,
+            key_provider=lambda: "sk-or-test-key",
+            nonce="test-nonce",
+        )
+        self.server, self.port = guard_module.serve(guard)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def test_stream_is_relayed_incrementally_and_intact(self):
+        total = _SlowUpstreamHandler.chunks * _SlowUpstreamHandler.interval
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/v1/responses",
+            data=json.dumps({"model": "z-ai/glm-5.2", "input": "hi"}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        started = time.monotonic()
+        with urllib.request.urlopen(request, timeout=30) as response:
+            first = response.read1(8192)
+            first_at = time.monotonic() - started
+            body = first
+            while True:
+                chunk = response.read1(8192)
+                if not chunk:
+                    break
+                body += chunk
+
+        # 上流が吐き終わるより十分早く最初のトークンが届くこと。
+        self.assertTrue(first)
+        self.assertLess(first_at, total / 4)
+        expected = b"".join(
+            f"data: token {index}\n\n".encode("utf-8")
+            for index in range(_SlowUpstreamHandler.chunks)
+        )
+        self.assertEqual(expected, body)
 
 
 if __name__ == "__main__":
