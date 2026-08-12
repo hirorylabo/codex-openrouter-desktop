@@ -87,7 +87,7 @@ codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter migrate
 codex-openrouter guard-log [--clear]
-codex-openrouter upgrade [--profile default|FILE]
+codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
@@ -95,6 +95,14 @@ codex-openrouter auth login|rotate|logout
 セットアップ後は`$HOME/.local/bin`を`PATH`へ追加してください。Desktopの`Codex OpenRouter.app`へfolderをdropして起動することもできます。
 
 FinderでDesktopの「スタックを使用」がONの場合、launcherは「アプリケーション」stack内へ表示されます。直接見える位置へ置く場合はFinderの`表示 > スタックを使用`をOFFにしてください。launcherはproject固有icon、bundle署名、既定workspaceをsetup/upgradeごとに再生成します。
+
+### クリック起動時の自動更新
+
+リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は`Codex OpenRouter.app`をクリックするたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。
+
+自動経路では実課金のAPI往復（`validate_key_and_profile`）を行いません。失敗しても起動は止まらず、`atomic_promote`のverifyが落ちれば直前の状態へ自動rollbackします。同じ内容で一度失敗したら、内容が変わるまで再試行しません。
+
+手動で`codex-openrouter upgrade`を打つ場合は、**リポジトリの`./codex-openrouter`を使ってください。** `PATH`上の`codex-openrouter`は導入元を導入済みツリー自身へ解決するため、そのまま実行しても内容は新しくなりません（その場合は警告を表示します）。
 
 ## Profile
 

@@ -26,7 +26,15 @@ from .processes import process_pids
 from .profile import resolve_profile
 from .promotion import atomic_promote
 from .supervisor import DEFAULT_PORT, Supervisor
-from .upgrade import BINARIES, UpgradeError, build_launcher, copy_support, render_template, run
+from .upgrade import (
+    BINARIES,
+    UpgradeError,
+    build_launcher,
+    copy_support,
+    manifest_document,
+    render_template,
+    run,
+)
 
 # v0.1.xの成果物。案Dでは使わないので掃除する。
 RETIRED_BINARIES = ("codex-openrouter-rebuild", "codex-openrouter-refresh")
@@ -134,15 +142,13 @@ def install(
         )
         _write_json(
             stage_state / "install-manifest.json",
-            {
-                "schema_version": 3,
-                "release_version": __version__,
-                "source_commit": commit.stdout.strip() or "release-archive",
-                "chatgpt_version": stock.version,
-                "chatgpt_build": stock.build,
-                "workspace": str(workspace),
-                "mode": "loopback-guard",
-            },
+            manifest_document(
+                source_root,
+                paths,
+                stock,
+                workspace,
+                commit.stdout.strip() or "release-archive",
+            ),
         )
 
         shutil.copy2(source_root / "codex-openrouter", stage_bin / "codex-openrouter")

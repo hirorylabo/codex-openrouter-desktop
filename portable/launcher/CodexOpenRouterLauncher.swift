@@ -13,8 +13,13 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
     private lazy var launcherLogPath =
         Bundle.main.object(forInfoDictionaryKey: "CodexLauncherLog") as? String
         ?? "\(userHome)/.local/share/codex-openrouter-desktop/state/logs/launcher.log"
+    // upgrade.py の STATUS_UPDATING / STATUS_LAUNCHING と同じ文字列であること。
+    private static let statusUpdating = "STATUS: updating"
+    private static let statusLaunching = "STATUS: launching"
     private var receivedWorkspace = false
     private var launchInProgress = false
+    private var outputTail = ""
+    private var progressWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
@@ -66,21 +71,29 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
             return
         }
 
+        // 出力は逐次読む。終了後にまとめて読むと、出力がpipe bufferを超えたときに
+        // 子が書き込みでブロックして進まなくなる。
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.consume(text) }
+        }
+
         // supervisorは self-heal → catalog再生成 → guard起動 を済ませてから純正appを
-        // 起動する。Codex更新直後は catalog再生成の分だけ待たされるので、出てくるまで
-        // ポーリングする。プロセスが先に終われば打ち切る。
-        pollForStockWindow(process: process, deadline: Date().addingTimeInterval(60))
+        // 起動する。Codex更新直後や自動更新が走ったときはその分待たされるので、
+        // 出てくるまでポーリングする。プロセスが先に終われば打ち切る。
+        pollForStockWindow(process: process, deadline: Date().addingTimeInterval(180))
 
         DispatchQueue.global(qos: .userInitiated).async {
             process.waitUntilExit()
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                self.hideProgress()
                 if process.terminationStatus != EXIT_SUCCESS {
                     self.showError(
                         "起動または検証に失敗しました。\n\n" +
-                        String(output.suffix(4000)) + "\n\n詳細: \(self.launcherLogPath)"
+                        String(self.outputTail.suffix(4000)) + "\n\n詳細: \(self.launcherLogPath)"
                     )
                 }
                 NSApplication.shared.terminate(nil)
@@ -88,10 +101,27 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 子の出力を溜めつつ、進行状況のsentinelに反応する。
+    private func consume(_ text: String) {
+        outputTail += text
+        if outputTail.count > 8000 {
+            outputTail = String(outputTail.suffix(8000))
+        }
+        if text.contains(Self.statusUpdating) {
+            showProgress("更新を適用しています…")
+        }
+        if text.contains(Self.statusLaunching) {
+            hideProgress()
+        }
+    }
+
     /// 純正appが現れるまで待って一度だけ前面へ出す。
     private func pollForStockWindow(process: Process, deadline: Date) {
         guard process.isRunning else { return }
-        if activateStockWindow() { return }
+        if activateStockWindow() {
+            hideProgress()
+            return
+        }
         guard Date() < deadline else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.pollForStockWindow(process: process, deadline: deadline)
@@ -108,6 +138,42 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
         }
         application.activate(options: [.activateAllWindows])
         return true
+    }
+
+    /// 自動更新は十数秒かかる。無表示だと起動しなかったように見えるのでHUDを出す。
+    private func showProgress(_ message: String) {
+        guard progressWindow == nil else { return }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 88),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Codex OpenRouter"
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.center()
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: message)
+        let stack = NSStackView(views: [spinner, label])
+        stack.orientation = .horizontal
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 20, right: 20)
+        window.contentView = stack
+
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        progressWindow = window
+    }
+
+    private func hideProgress() {
+        progressWindow?.orderOut(nil)
+        progressWindow = nil
     }
 
     private func showError(_ message: String) {

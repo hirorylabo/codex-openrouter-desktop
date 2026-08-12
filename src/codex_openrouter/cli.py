@@ -348,9 +348,20 @@ def guard_log_command(args: argparse.Namespace) -> int:
 
 
 def upgrade_command(args: argparse.Namespace) -> int:
-    from .upgrade import upgrade
+    from .upgrade import auto_upgrade, upgrade
 
-    return upgrade(root(), UserPaths.current(), args.profile)
+    paths = UserPaths.current()
+    if args.if_needed:
+        return auto_upgrade(paths, args.profile)
+    source_root = root()
+    if source_root == paths.support_root:
+        # PATH上の codex-openrouter は source root をインストール先へ解決する。
+        # そこから打つと自分自身を再インストールするだけで何も新しくならない。
+        print(
+            "WARNING: インストール済みツリー自身をsourceにしています。"
+            "新しい内容を反映するにはリポジトリの ./codex-openrouter を使ってください。"
+        )
+    return upgrade(source_root, paths, args.profile)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -393,6 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade_parser = subcommands.add_parser("upgrade")
     upgrade_parser.add_argument("--profile", default="default")
+    upgrade_parser.add_argument(
+        "--if-needed",
+        action="store_true",
+        help="導入元に差分があるときだけ更新する（ランチャーがクリック時に使う）",
+    )
     upgrade_parser.set_defaults(func=upgrade_command)
 
     rollback = subcommands.add_parser("rollback")

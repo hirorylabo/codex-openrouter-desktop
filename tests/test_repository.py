@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 from codex_openrouter import doctor as doctor_module
+from codex_openrouter import upgrade as upgrade_module
 
 
 class RepositoryTests(unittest.TestCase):
@@ -135,6 +136,10 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertIn("codex_openrouter.cli launch", source)
         self.assertIn("unset OPENROUTER_API_KEY", source)
+        # クリックだけで最新runtimeが載るように、exec前に差分を反映する。
+        self.assertIn("upgrade --if-needed", source)
+        # pipe越しはblock bufferingされ、ログが空のままHUDにも行が届かない。
+        self.assertIn("PYTHONUNBUFFERED=1", source)
         self.assertNotIn("/bin/ps -axo pid=,command=", source)
         # ASARパッチ方式の検証は全て不要になった。
         for retired in ("app.asar", "PATCH_MARKER", "patched_asar", "adapter.json", "codesign"):
@@ -197,6 +202,14 @@ class RepositoryTests(unittest.TestCase):
         upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
         self.assertIn("CodexLauncherLog", upgrade)
         self.assertIn('state_dir / "logs/launcher.log"', upgrade)
+
+    def test_progress_sentinels_match_between_swift_and_python(self) -> None:
+        """HUDの出し入れは文字列の一致が全て。片方だけ変えると黙って出なくなる。"""
+        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
+            encoding="utf-8"
+        )
+        for sentinel in (upgrade_module.STATUS_UPDATING, upgrade_module.STATUS_LAUNCHING):
+            self.assertIn(f'"{sentinel}"', swift)
 
     def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
