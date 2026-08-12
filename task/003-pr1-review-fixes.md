@@ -2,7 +2,16 @@
 
 作成日: 2026-08-12 / ブランチ: `codex/build-6396-adapter` / 対象: PR #1（v0.2.0 案D移行）
 
-Status: **進行中**
+Status: **実装完了・自動検証PASS。実機確認（`upgrade` 後のクリック起動）は未実施**
+
+### 検証結果（2026-08-12）
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests` → **132件 PASS**（130 + 追加2件）
+- 新テストが旧実装で落ちることを確認: `AssertionError: 2.0656 not less than 0.5`（最初のチャンクがストリーム完了後にしか届かない）
+- `python3 -m compileall -q src portable scripts` PASS
+- `xcrun swiftc portable/launcher/CodexOpenRouterLauncher.swift` PASS（CI macos-compile と同じ）
+- `python3 scripts/secret_scan.py --tree . --git-history` PASS、release archive のscanも PASS
+- `plutil -replace CodexLauncherLog` → `PlistBuddy -c Print` で焼き込みを実測確認、`plutil -lint` OK
 
 ## Context
 
