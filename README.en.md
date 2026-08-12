@@ -10,7 +10,7 @@ This CLI creates a dedicated local clone, `CODEX_HOME`, and Electron userData di
 ## Scope
 
 - Apple Silicon macOS only; no Windows, Linux, Intel Mac, or Homebrew support.
-- `v0.1.1` is a prerelease. The only known build is ChatGPT `26.803.41515` build `6321`.
+- `v0.2.0` is a prerelease. The only known build is ChatGPT `26.803.41515` build `6321`.
 - Unknown-build semantic candidates are best effort and never modify the stock app or promote without visual confirmation.
 - OpenRouter usage charges are the user's responsibility. Network doctor and candidate canaries may incur a small charge.
 
@@ -20,15 +20,15 @@ The project deliberately does not use `curl | bash`.
 
 ```bash
 mkdir codex-openrouter-download && cd codex-openrouter-download
-gh release download v0.1.1 --repo hirorylabo/codex-openrouter-desktop \
-  --pattern 'codex-openrouter-desktop-v0.1.1.tar.gz' \
-  --pattern 'codex-openrouter-desktop-v0.1.1.spdx.json' \
+gh release download v0.2.0 --repo hirorylabo/codex-openrouter-desktop \
+  --pattern 'codex-openrouter-desktop-v0.2.0.tar.gz' \
+  --pattern 'codex-openrouter-desktop-v0.2.0.spdx.json' \
   --pattern 'SHA256SUMS'
-gh attestation verify codex-openrouter-desktop-v0.1.1.tar.gz \
+gh attestation verify codex-openrouter-desktop-v0.2.0.tar.gz \
   --repo hirorylabo/codex-openrouter-desktop
 shasum -a 256 -c SHA256SUMS
-tar -xzf codex-openrouter-desktop-v0.1.1.tar.gz
-cd codex-openrouter-desktop-v0.1.1
+tar -xzf codex-openrouter-desktop-v0.2.0.tar.gz
+cd codex-openrouter-desktop-v0.2.0
 ```
 
 ## OpenRouter preparation

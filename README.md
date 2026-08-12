@@ -3,15 +3,18 @@
 > [!WARNING]
 > **非公式・実験的なworkaroundです。OpenAIおよびOpenRouterの公認・提携製品ではありません。** 初版はApple Silicon macOS専用です。ChatGPT.appの更新で停止する可能性があり、無保証です。OpenAI、ChatGPT、Codex、OpenRouterおよび各モデル名は各権利者の商標です。
 
-公式の署名済み`/Applications/ChatGPT.app`を変更せず、利用者のMac内で専用clone、専用`CODEX_HOME`、専用Electron userDataを作り、OpenRouter custom providerへ接続するCLIです。`ChatGPT.app`、ASAR、API key、Cookie、履歴、userData、ログは配布物にもrepositoryにも含みません。
+公式の署名済み`/Applications/ChatGPT.app`を**一切変更せず**、`~/.codex/config.toml`のmarker blockとローカルguardだけで、純正appのモデルピッカーにOpenRouterモデルを並べるCLIです。ASARパッチもcloneも作りません。`ChatGPT.app`、ASAR、API key、Cookie、履歴、userData、ログは配布物にもrepositoryにも含みません。
+
+Desktopの`Codex OpenRouter.app`から起動すると、事前処理のうえ純正appが立ち上がり、pickerにnativeとOpenRouterが両方並びます。終了時にcatalogを外すので、`ChatGPT.app`を直接起動したときはvanillaのままです。
 
 [English](./README.en.md)
 
 ## 対象と制限
 
 - Apple Silicon macOSのみ。Windows、Linux、Intel Mac、Homebrewは未対応です。
-- `v0.1.1`はprereleaseです。known buildはChatGPT `26.803.41515` build `6321`だけです。
-- 未知buildのcandidate transformはbest-effortです。純正appへは書き込まず、目視承認なしに昇格しません。
+- `v0.2.0`はprereleaseです。ASARパッチを撤去したため、**特定buildへの固定がなくなりました**。
+- OpenRouterモデルを選んでいる間だけ`model_provider`が切り替わります。その間、appが自前で作る背景thread（ambient suggestions等、`gpt-5.6-luna`固定）もOpenRouter側に束縛されるため、guardが遮断します。遮断された背景機能はOpenRouter利用中だけ動きません（**巻き込み**）。
+- thread途中でprovider境界をまたぐモデル変更はエラーになります。新しいthreadを立て直してください。
 - OpenRouter API利用料は利用者負担です。`doctor --network`とcandidate検査でも少量の料金が発生する場合があります。
 
 ## 安全な取得
@@ -20,16 +23,16 @@
 
 ```bash
 mkdir codex-openrouter-download && cd codex-openrouter-download
-gh release download v0.1.1 \
+gh release download v0.2.0 \
   --repo hirorylabo/codex-openrouter-desktop \
-  --pattern 'codex-openrouter-desktop-v0.1.1.tar.gz' \
-  --pattern 'codex-openrouter-desktop-v0.1.1.spdx.json' \
+  --pattern 'codex-openrouter-desktop-v0.2.0.tar.gz' \
+  --pattern 'codex-openrouter-desktop-v0.2.0.spdx.json' \
   --pattern 'SHA256SUMS'
-gh attestation verify codex-openrouter-desktop-v0.1.1.tar.gz \
+gh attestation verify codex-openrouter-desktop-v0.2.0.tar.gz \
   --repo hirorylabo/codex-openrouter-desktop
 shasum -a 256 -c SHA256SUMS
-tar -xzf codex-openrouter-desktop-v0.1.1.tar.gz
-cd codex-openrouter-desktop-v0.1.1
+tar -xzf codex-openrouter-desktop-v0.2.0.tar.gz
+cd codex-openrouter-desktop-v0.2.0
 ```
 
 sourceから使う場合も、Release archiveと同じallowlistを推奨します。
@@ -82,7 +85,8 @@ codex-openrouter check
 codex-openrouter setup [--workspace PATH] [--profile default|FILE] [--auth oauth|paste]
 codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
-codex-openrouter update
+codex-openrouter migrate
+codex-openrouter guard-log [--clear]
 codex-openrouter upgrade [--profile default|FILE]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
@@ -107,23 +111,29 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 
 API keyから見えるconcrete model集合がprofileと完全一致しない場合、専用appへ書き込む前に停止します。
 
-## 更新と未知build
+## 更新と移行
+
+Codexは週2回以上更新されます。ASARパッチ方式はそのたびにanchor再解析とhash再生成が要り保守が破綻するため、v0.2.0で撤去しました。現在は起動のたびに`CFBundleShortVersionString`と`CFBundleVersion`を前回値と照合し、変わっていればcompositeカタログを組み直します（ASAR hashは取りません）。
+
+v0.1.xからの移行:
 
 ```bash
-codex-openrouter update
+codex-openrouter migrate
 ```
 
-`update`は、known buildなら`upgrade`、未知buildならcandidate作成へ進みます。release archiveを更新した後、専用appを通常終了して次を実行すると、runtime・設定・known adapter appをstagingで検査してから切り替えます。
+旧専用app`~/Applications/ChatGPT OpenRouter.app`を削除し、`[model_providers.openrouter]`を`~/.codex/config.toml`へ永続化します。旧`~/.codex-openrouter`は**削除しません**。OpenRouterで記録した旧threadがあるため、読み取り専用のbackupとして残します。
+
+`[model_providers.openrouter]`は終了後も残ります。消すとOpenRouterで記録済みのthreadのresumeが`Model provider ... not found`でハードエラーになるためです。pickerからOpenRouterが消えるのはcatalog blockを外すからで、この2つは寿命が違います。
+
+## 巻き込みの確認
 
 ```bash
-./codex-openrouter upgrade
+codex-openrouter guard-log
 ```
 
-upgradeは現行targetを削除せずbackupへ保持し、切替後doctorが失敗した場合は全targetを自動rollbackします。成功後も`codex-openrouter rollback`で直前のruntime一式へ戻せます。known buildはRelease同梱の[`adapters/index.json`](./adapters/index.json)でversion、build、stock/patched ASAR hash、markerを固定します。rebuildとinstallerはactive adapterとindexの完全一致からpatcherを解決し、build固有の値をruntime scriptへ重複させません。
+guardが中継したmodelと遮断したmodelを集計します。遮断側に出るのが巻き込みです。Codexの更新で背景機能が増減するので、更新後にこれを見てください。現時点で判明しているのは`gpt-5.6-luna`（ambient suggestionsとその安全性分類）です。
 
-未知buildでは純正appを変更せずcandidate cloneだけを作ります。lockfile固定のJS parserがrouting、model visibility、label fallbackのsemantic anchorを各1件だけ認識した場合に限りpatchします。
-
-Candidateは署名、ASAR integrity、App Server model list、全model／公開effortの`provider.zdr=true` canary、実providerが稼働中ZDR endpointであることを検査します。その後、利用者がモデルピッカーとタスク開始を目視確認し、`PROMOTE`と入力した場合だけ昇格します。昇格後doctorが失敗すれば旧appと設定へ自動rollbackし、失敗candidateと秘密値除外済み診断bundleを保持します。診断情報は自動送信しません。
+guardは許可集合（[`models/registry.json`](./models/registry.json)の5モデル）以外を**1バイトも外へ出さずに**400で止めます。guard logにはmodel・判定・バイト数・時刻だけを記録し、本文と鍵は残しません。
 
 ## 価格表示
 
