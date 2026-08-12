@@ -303,7 +303,8 @@ def compact_legacy_home(home: Path) -> str:
             if path.is_file() and not path.is_symlink():
                 freed += path.stat().st_size
         shutil.rmtree(target)
-    for path in home.glob("*.sqlite*"):
+    # logsのsqliteだけ消す。memories/goals/stateは小さく、かつ利用者の内容なので残す。
+    for path in home.glob("logs_*.sqlite*"):
         if path.is_file():
             freed += path.stat().st_size
             path.unlink()
@@ -429,3 +430,12 @@ def main(argv: list[str] | None = None) -> int:
     ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
+
+
+if __name__ == "__main__":
+    # ランチャーは `python3 -m codex_openrouter.cli launch` で入る。
+    # このguardが無いとmoduleを読み込むだけで何もせず終了する。
+    os.environ.setdefault(
+        "CODEX_OPENROUTER_SOURCE_ROOT", str(Path(__file__).resolve().parents[2])
+    )
+    raise SystemExit(main())
