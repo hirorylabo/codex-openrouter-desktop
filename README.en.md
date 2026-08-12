@@ -33,7 +33,7 @@ cd codex-openrouter-desktop-v0.2.0
 
 ## OpenRouter preparation
 
-Install the official signed ChatGPT.app, Xcode Command Line Tools, Python 3.11+, and Node.js/npm. In OpenRouter, disable prompt training, public free endpoints, and the 1% data discount; enable Non-frontier ZDR; create a Guardrail whose exact model allowlist matches the selected profile; assign it to the OAuth-created key; and set a spend limit.
+Install the official signed ChatGPT.app, Xcode Command Line Tools, and Python 3.11+. (The Node.js dependency was removed in v0.2.0.) In OpenRouter, disable prompt training, public free endpoints, and the 1% data discount; enable Non-frontier ZDR; create a Guardrail whose exact model allowlist matches the selected profile; assign it to the OAuth-created key; and set a spend limit.
 
 ## Setup
 

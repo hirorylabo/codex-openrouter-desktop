@@ -2,7 +2,32 @@
 
 作成日: 2026-08-12 / ブランチ: `codex/build-6396-adapter` / 対象: ChatGPT `26.803.61601` build `6396`
 
-Status: **完了（Phase 1〜4）**
+Status: **完了（Phase 1〜4 + prod反映）。v0.2.0として実機稼働中**
+
+### prod反映（2026-08-12）
+
+実装完了後、**リポジトリ上は完成していたが実機には未反映**という状態だった。`setup`/`upgrade` を一度も実行していなかったため、Desktopの `Codex OpenRouter.app` は v0.1.1 のままで、純正appの更新（`26.803.41515` → `26.803.61601`）に取り残されて起動できなくなっていた。
+
+反映にあたり3つの取り残しが判明した。Phase 3で `upgrade.py` と `cli.py` は書き換えたのに、インストーラとテンプレート2本が v0.1.x のまま残っていた。**CIが `zsh -n`（構文のみ）しか見ていなかったため、参照先が消えていても検出できなかった。**
+
+対処:
+
+- `install.py` を新設し、初回インストールと更新を1本の経路へ統合（`portable/install.sh` は撤去）
+- doctor 595行を `src/codex_openrouter/doctor.py` へ移し、テンプレートはshimに。ASAR/clone/hash固定の検査を削除し、config marker・catalog契約・guard・鍵の非混入を見る
+- refresh 771行から価格/ZDR取得を `src/codex_openrouter/pricing.py` へ移し、価格表示を復活
+- src配下がrepo内の存在しないpathを参照していたら落ちるテストを追加（再発防止）
+
+実機結果: install PASS、`doctor --network --secret-scan` PASS（5モデル全てが稼働中ZDR providerで応答）、ディスク **約10.4GB解放**（旧home 9.3GB→194MB、旧clone app 1.4GB削除）。
+
+反映中に見つけた実バグ3件:
+
+1. **ランチャーが無反応になる経路** — `cli.py` に `__main__` guard が無く `python3 -m codex_openrouter.cli launch` が何もせず exit 0 していた。ランチャーはこの呼び方をするため、インストールしてもクリックで無反応になるところだった
+2. **旧home圧縮が user data を消していた** — `*.sqlite*` glob が memories/goals/state まで対象にしていた。削除前に対象一覧を提示する手順にしていたため実行前に発見
+3. **secret scanの検査スコープ誤り** — doctor自身のプロセス環境を見ていた。守るべきは「起動されるappへ渡らないこと」。利用者が他ツール用にexportしているのは正当で、これでinstallが落ちた（**verify失敗時の自動rollbackは正しく動作**）
+
+---
+
+**Phase 1〜4の結果**
 
 | Phase | 内容 | 結果 |
 |---|---|---|

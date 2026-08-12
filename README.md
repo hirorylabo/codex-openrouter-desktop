@@ -40,7 +40,7 @@ sourceから使う場合も、Release archiveと同じallowlistを推奨しま�
 ## 事前準備
 
 1. 公式の署名済み`/Applications/ChatGPT.app`をインストールします。
-2. Xcode Command Line Tools、Python 3.11以上、Node.js/npm、GitHub CLIを用意します。
+2. Xcode Command Line Tools、Python 3.11以上、GitHub CLIを用意します。（v0.2.0でNode.js依存は撤去しました）
 3. OpenRouterで次を設定します。
    - PrivacyでPrompt TrainingをOFFにし、無料公開endpointと1% data discountを使用しない。
    - Non-frontier ZDRをONにする。
@@ -109,7 +109,7 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 }
 ```
 
-API keyから見えるconcrete model集合がprofileと完全一致しない場合、専用appへ書き込む前に停止します。
+API keyから見えるconcrete model集合がprofileと完全一致しない場合、導入を停止します。
 
 ## 更新と移行
 
@@ -121,7 +121,9 @@ v0.1.xからの移行:
 codex-openrouter migrate
 ```
 
-旧専用app`~/Applications/ChatGPT OpenRouter.app`を削除し、`[model_providers.openrouter]`を`~/.codex/config.toml`へ永続化します。旧`~/.codex-openrouter`は**削除しません**。OpenRouterで記録した旧threadがあるため、読み取り専用のbackupとして残します。
+旧専用app`~/Applications/ChatGPT OpenRouter.app`を削除し、`[model_providers.openrouter]`を`~/.codex/config.toml`へ永続化し、旧`~/.codex-openrouter`を圧縮します。
+
+圧縮では`sessions`（旧threadの記録）と`memories`/`goals`/`state`のsqliteを残し、ASARパッチ方式の`candidates`・旧clone appの`user-data`・`plugins`・logsを削除します。`--keep-all`で圧縮を抑止できます。実機では9.3GBが194MBになりました。
 
 `[model_providers.openrouter]`は終了後も残ります。消すとOpenRouterで記録済みのthreadのresumeが`Model provider ... not found`でハードエラーになるためです。pickerからOpenRouterが消えるのはcatalog blockを外すからで、この2つは寿命が違います。
 
