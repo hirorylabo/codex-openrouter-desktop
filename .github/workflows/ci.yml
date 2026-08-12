@@ -45,7 +45,6 @@ jobs:
           test -s /tmp/AppIcon.icns
       - name: Parse zsh entry points
         run: |
-          zsh -n portable/install.sh
           zsh -n portable/templates/codex-openrouter-app.zsh.in
           zsh -n portable/launcher/build_icon.zsh
       - name: Synthetic upgrade, promotion, and rollback E2E

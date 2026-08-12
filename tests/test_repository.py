@@ -13,24 +13,7 @@ import urllib.error
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_doctor_template():
-    source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(
-        encoding="utf-8"
-    )
-    rendered = source.replace("@@PYTHON@@", "/usr/bin/python3").replace(
-        "@@USER_HOME@@", "/tmp/codex-openrouter-test-home"
-    )
-    temporary = tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False)
-    try:
-        temporary.write(rendered)
-        temporary.close()
-        spec = importlib.util.spec_from_file_location("tested_doctor", temporary.name)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        Path(temporary.name).unlink(missing_ok=True)
+from codex_openrouter import doctor as doctor_module
 
 
 class RepositoryTests(unittest.TestCase):
@@ -76,18 +59,7 @@ class RepositoryTests(unittest.TestCase):
             registry["models"]["moonshotai/kimi-k3"]["codex_modalities"],
         )
 
-    def test_network_doctor_verifies_request_zdr_generation_provider(self) -> None:
-        source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(encoding="utf-8")
-        self.assertIn('provider: dict[str, object] = {"zdr": True}', source)
-        self.assertIn('provider["order"] = provider_tags', source)
-        self.assertIn('provider["allow_fallbacks"] = False', source)
-        self.assertIn('"X-Generation-Id"', source)
-        self.assertIn('metadata.get("provider_name")', source)
-        self.assertIn("/api/v1/endpoints/zdr", source)
-
     def test_network_request_pins_active_zdr_provider_tags(self) -> None:
-        doctor = load_doctor_template()
-
         class Response:
             status = 200
             headers = {"X-Generation-Id": "gen-test"}
@@ -101,8 +73,10 @@ class RepositoryTests(unittest.TestCase):
             def read(self):
                 return b'{"model":"example/model"}'
 
-        with mock.patch.object(doctor.urllib.request, "urlopen", return_value=Response()) as urlopen:
-            status, body, generation_id = doctor.request_model(
+        with mock.patch.object(
+            doctor_module.urllib.request, "urlopen", return_value=Response()
+        ) as urlopen:
+            status, body, generation_id = doctor_module.request_model(
                 "secret", "example/model", "high", ["provider-a", "provider-b"]
             )
 
@@ -111,62 +85,48 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual("example/model", body["model"])
         self.assertEqual("gen-test", generation_id)
         self.assertEqual(
-            {
-                "zdr": True,
-                "order": ["provider-a", "provider-b"],
-                "allow_fallbacks": False,
-            },
+            {"zdr": True, "order": ["provider-a", "provider-b"], "allow_fallbacks": False},
             payload["provider"],
         )
 
     def test_generation_metadata_retries_eventual_404(self) -> None:
-        doctor = load_doctor_template()
         not_found = urllib.error.HTTPError(
-            "https://openrouter.ai/api/v1/generation?id=gen-test",
-            404,
-            "Not Found",
-            {},
-            None,
+            "https://openrouter.ai/api/v1/generation?id=gen-test", 404, "Not Found", {}, None
         )
         with (
             mock.patch.object(
-                doctor,
+                doctor_module,
                 "authenticated_json",
                 side_effect=[not_found, not_found, {"data": {"provider_name": "Example"}}],
             ) as request,
-            mock.patch.object(doctor.time, "sleep") as sleep,
+            mock.patch.object(doctor_module.time, "sleep") as sleep,
         ):
-            metadata = doctor.generation_metadata("secret", "gen-test")
+            metadata = doctor_module.generation_metadata("secret", "gen-test")
         self.assertEqual("Example", metadata["provider_name"])
         self.assertEqual(3, request.call_count)
         self.assertEqual([mock.call(2), mock.call(2)], sleep.call_args_list)
 
     def test_generation_metadata_does_not_retry_non_404(self) -> None:
-        doctor = load_doctor_template()
         unauthorized = urllib.error.HTTPError(
-            "https://openrouter.ai/api/v1/generation?id=gen-test",
-            401,
-            "Unauthorized",
-            {},
-            None,
+            "https://openrouter.ai/api/v1/generation?id=gen-test", 401, "Unauthorized", {}, None
         )
         with (
-            mock.patch.object(doctor, "authenticated_json", side_effect=unauthorized),
-            mock.patch.object(doctor.time, "sleep") as sleep,
+            mock.patch.object(doctor_module, "authenticated_json", side_effect=unauthorized),
+            mock.patch.object(doctor_module.time, "sleep") as sleep,
             self.assertRaises(urllib.error.HTTPError),
         ):
-            doctor.generation_metadata("secret", "gen-test")
+            doctor_module.generation_metadata("secret", "gen-test")
         sleep.assert_not_called()
 
-    def test_runtime_process_match_excludes_wrapper_commands(self) -> None:
-        doctor = load_doctor_template()
-        executable = doctor.OPENROUTER_APP / "Contents/MacOS/ChatGPT"
-        real = f"  123 {executable} --user-data-dir=/tmp/user-data"
-        wrapper = f"  456 /bin/zsh -lc echo {executable}"
-        self.assertEqual(
-            [(123, f"{executable} --user-data-dir=/tmp/user-data")],
-            doctor.matching_processes(f"{real}\n{wrapper}\n", executable),
+    def test_doctor_template_is_a_thin_shim(self) -> None:
+        """検査ロジックはモジュール側にあり、テンプレートは委譲するだけ。"""
+        source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(
+            encoding="utf-8"
         )
+        self.assertIn("from codex_openrouter.doctor import run", source)
+        self.assertLess(len(source.splitlines()), 60)
+        for retired in ("app.asar", "adapter.json", "patched_asar", "OPENROUTER_APP"):
+            self.assertNotIn(retired, source)
 
     def test_launcher_delegates_to_supervisor_and_never_touches_the_stock_app(self) -> None:
         """ランチャーは純正appを検証も改変もしない。事前処理はsupervisorが持つ。"""
@@ -195,12 +155,34 @@ class RepositoryTests(unittest.TestCase):
         ):
             self.assertNotIn(retired, upgrade)
 
+    def test_no_source_references_a_deleted_repository_path(self) -> None:
+        """テンプレートとコードが参照するrepo内pathが実在すること。
+
+        v0.2.0でASAR資産を消したとき、install.shが消えたファイルを参照したまま
+        残っていた。CIは `zsh -n`（構文のみ）しか見ておらず検出できなかった。
+        """
+        pattern = re.compile(
+            r"""["'](portable/[A-Za-z0-9_./-]+|models/[A-Za-z0-9_./-]+|"""
+            r"""profiles/[A-Za-z0-9_./-]+|adapters/[A-Za-z0-9_./-]+|scripts/[A-Za-z0-9_./-]+)["']"""
+        )
+        missing = []
+        for path in (ROOT / "src").rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            for match in pattern.finditer(path.read_text(encoding="utf-8")):
+                referenced = match.group(1)
+                if "@@" in referenced or "*" in referenced:
+                    continue
+                if not (ROOT / referenced).exists():
+                    missing.append(f"{path.relative_to(ROOT)} -> {referenced}")
+        self.assertEqual([], missing)
+
     def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
-        installer = (ROOT / "portable/install.sh").read_text(encoding="utf-8")
+        upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
         self.assertIn("CFBundleIconFile", info)
         self.assertIn("AppIcon", info)
-        self.assertIn("build_icon.zsh", installer)
+        self.assertIn("build_icon.zsh", upgrade)
         self.assertTrue((ROOT / "portable/launcher/CreateLauncherIcon.swift").is_file())
 
 

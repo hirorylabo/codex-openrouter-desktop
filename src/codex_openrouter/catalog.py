@@ -15,6 +15,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from . import pricing
+
 OR_PREFIX = "[OR] "
 
 # nativeだけが持つ能力フィールド。cloneが継ぐとOpenRouterモデルが
@@ -63,8 +65,17 @@ def clone_template(natives: list[dict]) -> dict:
     raise CatalogError("visibility=listのnative entryがありません")
 
 
-def build(natives: list[dict], registry_models: dict[str, dict]) -> dict:
-    """native全件 + OpenRouter 5件のcompositeを組む。"""
+def build(
+    natives: list[dict],
+    registry_models: dict[str, dict],
+    prices: dict | None = None,
+    registry: dict | None = None,
+) -> dict:
+    """native全件 + OpenRouter 5件のcompositeを組む。
+
+    `prices` を渡すと説明文へ headline と ZDR稼働endpoint最安を入れる。
+    省略時は registry の capability 文だけになる。
+    """
     template = clone_template(natives)
     max_priority = max((model.get("priority") or 0) for model in natives)
     entries = list(natives)
@@ -73,7 +84,10 @@ def build(natives: list[dict], registry_models: dict[str, dict]) -> dict:
         entry = json.loads(json.dumps(template))
         entry["slug"] = slug
         entry["display_name"] = OR_PREFIX + spec["display_name"]
-        entry["description"] = spec["capability"]
+        if prices is not None and registry is not None:
+            entry["description"] = pricing.describe(slug, spec, prices, registry)
+        else:
+            entry["description"] = spec["capability"]
         entry["visibility"] = "list"
         entry["priority"] = max_priority + offset
         entry["supported_in_api"] = True
@@ -154,9 +168,20 @@ def write(document: dict, path: Path) -> Path:
     return path
 
 
-def generate(codex: Path, codex_home: Path, registry_path: Path, output: Path) -> Path:
-    """取得 → 組み立て → 契約検証 → 原子的置換。"""
-    registry_models = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
-    document = build(bundled_models(codex, codex_home), registry_models)
+def generate(
+    codex: Path,
+    codex_home: Path,
+    registry_path: Path,
+    output: Path,
+    price_state: Path | None = None,
+) -> Path:
+    """取得 → 価格解決 → 組み立て → 契約検証 → 原子的置換。
+
+    価格取得が失敗してもregistryのfallbackへ倒れるので、ここは止まらない。
+    """
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry_models = registry["models"]
+    prices = pricing.resolve(registry, price_state)
+    document = build(bundled_models(codex, codex_home), registry_models, prices, registry)
     validate(document, registry_models)
     return write(document, output)

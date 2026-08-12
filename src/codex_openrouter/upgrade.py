@@ -37,7 +37,6 @@ class UpgradeError(RuntimeError):
 BINARIES = (
     "codex-openrouter",
     "codex-openrouter-credential",
-    "codex-openrouter-refresh",
     "codex-openrouter-doctor",
     "codex-openrouter-app",
 )
@@ -213,7 +212,6 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
         shutil.copy2(source_root / "codex-openrouter", stage_bin / "codex-openrouter")
         (stage_bin / "codex-openrouter").chmod(0o755)
         for template, target in (
-            ("codex-openrouter-refresh.py.in", "codex-openrouter-refresh"),
             ("codex-openrouter-doctor.py.in", "codex-openrouter-doctor"),
             ("codex-openrouter-app.zsh.in", "codex-openrouter-app"),
         ):
@@ -228,7 +226,6 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
                 python,
                 "-m",
                 "py_compile",
-                str(stage_bin / "codex-openrouter-refresh"),
                 str(stage_bin / "codex-openrouter-doctor"),
             ]
         )

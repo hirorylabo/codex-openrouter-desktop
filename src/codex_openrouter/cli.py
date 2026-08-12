@@ -124,16 +124,14 @@ def setup_command(args: argparse.Namespace) -> int:
     finally:
         if temporary is not None:
             temporary.cleanup()
-    command = [
-        str(root() / "portable/install.sh"),
-        "--install",
-        "--workspace",
-        str(Path(args.workspace).expanduser().resolve()),
-        "--profile",
-        str(selected),
-    ]
-    print("INFO: setup終盤のnetwork canaryは少量のOpenRouter API利用料が発生する場合があります。")
-    return subprocess.run(command).returncode
+    from .install import install
+
+    return install(
+        root(),
+        paths,
+        args.profile,
+        workspace=Path(args.workspace).expanduser().resolve(),
+    )
 
 
 def delegate(executable: Path, arguments: list[str]) -> int:
@@ -225,7 +223,7 @@ def launch_command(args: argparse.Namespace) -> int:
     return Supervisor(paths, root() / "models/registry.json", workspace=workspace).run()
 
 
-def migrate_command(_args: argparse.Namespace) -> int:
+def migrate_command(args: argparse.Namespace) -> int:
     """旧clone方式(v0.1.x)から案Dへ移行する。
 
     旧 ~/.codex-openrouter は消さない。OpenRouterで記録した旧threadがあるため、
@@ -257,13 +255,59 @@ def migrate_command(_args: argparse.Namespace) -> int:
         actions.append(f"旧専用appを削除しました: {paths.openrouter_app}")
 
     if paths.codex_home.is_dir():
-        actions.append(
-            f"旧home {paths.codex_home} は読み取り専用backupとして残しました（旧threadの記録があるため）"
-        )
+        if getattr(args, "keep_all", False):
+            actions.append(f"旧home {paths.codex_home} はそのまま残しました")
+        else:
+            freed = compact_legacy_home(paths.codex_home)
+            actions.append(
+                f"旧home を sessions だけ残して圧縮しました（{freed} 解放 / {paths.codex_home}）"
+            )
     for message in actions:
         print(f"- {message}")
     print("MIGRATE: PASS")
     return 0
+
+
+# 案Dで参照されなくなる旧home配下。sessionsとhistoryだけ残す。
+LEGACY_DISPOSABLE = (
+    "candidates",      # ASARパッチ方式のcandidate clone群。大半の容量はここ
+    "user-data",       # 旧clone appのElectron userData
+    "plugins",
+    "computer-use",
+    "upgrade-backups",
+    "logs",
+    "cache",
+    "tmp",
+    "backups",
+    "archived_worktrees",
+    "worktrees",
+)
+
+
+def _human(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{size}B"
+        size /= 1024
+    return f"{size:.1f}GB"
+
+
+def compact_legacy_home(home: Path) -> str:
+    """旧homeを sessions 中心に絞る。sessionsとhistoryには触らない。"""
+    freed = 0
+    for name in LEGACY_DISPOSABLE:
+        target = home / name
+        if not target.is_dir() or target.is_symlink():
+            continue
+        for path in target.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                freed += path.stat().st_size
+        shutil.rmtree(target)
+    for path in home.glob("*.sqlite*"):
+        if path.is_file():
+            freed += path.stat().st_size
+            path.unlink()
+    return _human(freed)
 
 
 def guard_log_command(args: argparse.Namespace) -> int:
@@ -338,6 +382,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("--keep-all", action="store_true",
+                         help="旧 ~/.codex-openrouter を圧縮せずそのまま残す")
     migrate.set_defaults(func=migrate_command)
 
     guard_log = subcommands.add_parser("guard-log")
