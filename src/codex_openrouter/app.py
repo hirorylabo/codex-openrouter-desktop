@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any
 
 
 class AppError(RuntimeError):
@@ -119,26 +117,6 @@ def stock_build_id(app: Path = Path("/Applications/ChatGPT.app")) -> tuple[str, 
     if not app.is_dir():
         raise AppError(f"公式ChatGPT.appが見つかりません: {app}")
     return _plist_value(app, "CFBundleShortVersionString"), _plist_value(app, "CFBundleVersion")
-
-
-def load_adapter(index_path: Path, stock: StockBuild) -> dict[str, Any] | None:
-    try:
-        document = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AppError(f"adapter indexを読めません: {exc}") from exc
-    if document.get("schema_version") != 1 or not isinstance(document.get("adapters"), list):
-        raise AppError("adapter index schemaが不正です")
-    matches = [
-        adapter
-        for adapter in document["adapters"]
-        if isinstance(adapter, dict)
-        and adapter.get("chatgpt_version") == stock.version
-        and str(adapter.get("chatgpt_build")) == stock.build
-        and adapter.get("stock_asar_sha256") == stock.asar_sha256
-    ]
-    if len(matches) > 1:
-        raise AppError("同じstock buildへ複数のadapterが一致しました")
-    return matches[0] if matches else None
 
 
 def assert_apple_silicon() -> None:

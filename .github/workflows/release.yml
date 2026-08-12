@@ -22,9 +22,7 @@ jobs:
       - name: Test and audit
         run: |
           PYTHONPATH=src python3 -m unittest discover -s tests -v
-          cd portable/patcher-js && npm ci --ignore-scripts && npm test && cd ../..
           python3 scripts/secret_scan.py --tree . --git-history
-          python3 scripts/audit_upstream.py
       - name: Build release assets
         run: |
           python3 scripts/build_release.py "$GITHUB_REF_NAME"

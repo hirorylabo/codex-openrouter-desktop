@@ -2,32 +2,23 @@
 set -eu
 setopt pipefail
 
+# 案D: 純正 /Applications/ChatGPT.app は一切変更しない。
+# ASAR hash・patch marker・専用appの署名検証は不要になったので持たない。
+# ここは事前処理と後始末を supervisor へ渡すだけの薄い入口。
+
 readonly STOCK_APP="/Applications/ChatGPT.app"
-readonly OPENROUTER_APP="@@USER_HOME@@/Applications/ChatGPT OpenRouter.app"
-readonly CODEX_HOME="@@USER_HOME@@/.codex-openrouter"
-readonly ADAPTER="$CODEX_HOME/adapter.json"
-readonly LOG_DIR="$CODEX_HOME/logs"
-readonly LOG_FILE="$LOG_DIR/desktop.log"
+readonly STATE_DIR="@@USER_HOME@@/.local/share/codex-openrouter-desktop/state"
+readonly LOG_DIR="$STATE_DIR/logs"
 readonly LAUNCHER_LOG="$LOG_DIR/launcher.log"
-readonly DOCTOR="@@USER_HOME@@/.local/bin/codex-openrouter-doctor"
-readonly REFRESH="@@USER_HOME@@/.local/bin/codex-openrouter-refresh"
 readonly PYTHON="@@PYTHON@@"
 readonly SUPPORT_ROOT="@@USER_HOME@@/.local/share/codex-openrouter-desktop/current"
-readonly EXECUTABLE="$OPENROUTER_APP/Contents/MacOS/ChatGPT"
+readonly CREDENTIAL="@@USER_HOME@@/.local/bin/codex-openrouter-credential"
 readonly MAX_LOG_BYTES=$((10 * 1024 * 1024))
 
 fail() {
   print -u2 -- "Codex OpenRouter: $*"
   [[ ! -d "$LOG_DIR" ]] || print -- "$(/bin/date '+%Y-%m-%dT%H:%M:%S%z') FAIL $*" >> "$LAUNCHER_LOG"
   exit 1
-}
-
-bundle_value() {
-  /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null
-}
-
-file_sha256() {
-  /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
 }
 
 rotate_log() {
@@ -39,90 +30,25 @@ rotate_log() {
   /bin/mv -f "$path" "$path.1"
 }
 
-[[ -x "$PYTHON" && -x "$DOCTOR" && -x "$REFRESH" ]] || \
-  fail "必要なruntime componentがありません。codex-openrouter setupを再実行してください。"
-[[ -f "$ADAPTER" && ! -L "$ADAPTER" ]] || fail "adapter.jsonがありません。"
-
-adapter_fields="$($PYTHON - "$ADAPTER" <<'PY'
-import json, re, sys
-d=json.load(open(sys.argv[1], encoding="utf-8"))
-values=[d.get(k) for k in ("id","chatgpt_version","chatgpt_build","stock_asar_sha256","patched_asar_sha256","marker")]
-if not all(isinstance(v,str) and v for v in values): raise SystemExit(1)
-if not re.fullmatch(r"[A-Za-z0-9._-]+", values[0]): raise SystemExit(1)
-if not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in values[3:5]): raise SystemExit(1)
-print("\t".join(values))
-PY
-)" || fail "adapter.jsonが不正です。"
-IFS=$'\t' read -r ADAPTER_ID EXPECTED_VERSION EXPECTED_BUILD STOCK_HASH PATCHED_HASH PATCH_MARKER <<< "$adapter_fields"
-readonly USER_DATA_DIR="$CODEX_HOME/user-data/$ADAPTER_ID"
-
-[[ -d "$STOCK_APP" && -d "$OPENROUTER_APP" ]] || fail "ChatGPT.appまたは専用appがありません。"
-[[ "$(bundle_value "$STOCK_APP" CFBundleShortVersionString)" == "$EXPECTED_VERSION" && \
-   "$(bundle_value "$STOCK_APP" CFBundleVersion)" == "$EXPECTED_BUILD" ]] || \
-  fail "公式ChatGPT.appはactive adapterと一致しません。codex-openrouter updateを実行してください。"
-[[ "$(file_sha256 "$STOCK_APP/Contents/Resources/app.asar")" == "$STOCK_HASH" ]] || \
-  fail "公式ASAR hashがactive adapterと一致しません。"
-[[ "$(file_sha256 "$OPENROUTER_APP/Contents/Resources/app.asar")" == "$PATCHED_HASH" ]] || \
-  fail "専用ASAR hashがactive adapterと一致しません。"
-/usr/bin/grep -aFq "$PATCH_MARKER" "$OPENROUTER_APP/Contents/Resources/app.asar" || \
-  fail "専用ASARにadapter markerがありません。"
-/usr/bin/codesign --verify --deep --strict "$OPENROUTER_APP" 2>/dev/null || \
-  fail "専用appの署名検証に失敗しました。"
+[[ -x "$PYTHON" ]] || fail "python3がありません。codex-openrouter setupを再実行してください。"
+[[ -d "$SUPPORT_ROOT/src" ]] || fail "runtimeがありません。codex-openrouter setupを再実行してください。"
+[[ -d "$STOCK_APP" ]] || fail "公式ChatGPT.appがありません: $STOCK_APP"
+[[ -x "$CREDENTIAL" ]] || fail "Keychain helperがありません。codex-openrouter setupを再実行してください。"
 
 workspace="${1:-$PWD}"
 [[ -d "$workspace" ]] || fail "workspaceはディレクトリを指定してください: $workspace"
 [[ "$workspace" == /* ]] || workspace="$PWD/$workspace"
-/bin/mkdir -p "$USER_DATA_DIR" "$LOG_DIR"
-/bin/chmod 700 "$USER_DATA_DIR" "$LOG_DIR"
-rotate_log "$LOG_FILE"
+
+/bin/mkdir -p "$LOG_DIR"
+/bin/chmod 700 "$STATE_DIR" "$LOG_DIR"
 rotate_log "$LAUNCHER_LOG"
-(umask 077 && : >> "$LOG_FILE" && : >> "$LAUNCHER_LOG")
-/bin/chmod 600 "$LOG_FILE" "$LAUNCHER_LOG"
+(umask 077 && : >> "$LAUNCHER_LOG")
+/bin/chmod 600 "$LAUNCHER_LOG"
 
-"$PYTHON" "$DOCTOR" >> "$LAUNCHER_LOG" 2>&1 || \
-  fail "起動前doctorに失敗しました。詳細: $LAUNCHER_LOG"
-set +e
-"$PYTHON" "$REFRESH" --if-stale >> "$LAUNCHER_LOG" 2>&1
-refresh_status=$?
-set -e
-[[ "$refresh_status" -eq 0 || "$refresh_status" -eq 2 ]] || \
-  fail "モデルカタログの契約検証に失敗しました。詳細: $LAUNCHER_LOG"
-
-existing=()
-process_pids="$(PYTHONPATH="$SUPPORT_ROOT/src" "$PYTHON" -m codex_openrouter.processes \
-  --executable "$EXECUTABLE")" || fail "process listを取得できません。"
-while read -r pid; do
-  [[ "$pid" == <-> ]] && existing+=("$pid")
-done <<< "$process_pids"
-(( ${#existing[@]} <= 1 )) || fail "専用app main processが複数あります。通常終了してください。"
-if (( ${#existing[@]} == 1 )); then
-  command_line="$(/bin/ps -p "${existing[1]}" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"--user-data-dir=$USER_DATA_DIR"* ]] || \
-    fail "既存の専用appが別userDataで動作しています。"
-  "$PYTHON" "$DOCTOR" --runtime
-  exit 0
-fi
-
-# Keychain helper is the only credential path. Shell secrets are not inherited.
+# 鍵はKeychain helper経由でのみ渡る。shellのsecretは継がせない。
 unset OPENROUTER_API_KEY CODEX_ACCESS_TOKEN
-/usr/bin/nohup /usr/bin/env \
-  CODEX_HOME="$CODEX_HOME" \
-  CODEX_PROFILE_NO_UPDATE_CHECK=1 \
-  "$EXECUTABLE" \
-  "--user-data-dir=$USER_DATA_DIR" \
-  "$workspace" \
-  >> "$LOG_FILE" 2>&1 </dev/null &
-app_pid=$!
 
-attempt=0
-while (( attempt < 20 )); do
-  /bin/kill -0 "$app_pid" 2>/dev/null || break
-  command_line="$(/bin/ps -p "$app_pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"$EXECUTABLE"* && "$command_line" == *"--user-data-dir=$USER_DATA_DIR"* ]] && break
-  /bin/sleep 0.5
-  (( attempt += 1 ))
-done
-/bin/kill -0 "$app_pid" 2>/dev/null || fail "専用appが起動直後に終了しました。詳細: $LOG_FILE"
-"$PYTHON" "$DOCTOR" --runtime >> "$LAUNCHER_LOG" 2>&1 || \
-  fail "起動後doctorに失敗しました。詳細: $LAUNCHER_LOG"
-print -- "Codex OpenRouter: launch verified (pid=$app_pid, adapter=$ADAPTER_ID)"
+# supervisor が [1]self-heal [2]排他 [3]update追従 [4]port [5]config
+# [6]guard/watcher [7]純正app起動 [8]後始末 まで面倒を見る。
+exec /usr/bin/env PYTHONPATH="$SUPPORT_ROOT/src" \
+  "$PYTHON" -m codex_openrouter.cli launch "$workspace" 2>&1 | /usr/bin/tee -a "$LAUNCHER_LOG"

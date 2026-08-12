@@ -57,14 +57,11 @@ class RepositoryTests(unittest.TestCase):
                 matches.append(str(path.relative_to(ROOT)))
         self.assertEqual([], matches)
 
-    def test_registry_profile_and_adapter_inventories_are_consistent(self) -> None:
+    def test_registry_and_profile_inventories_are_consistent(self) -> None:
         registry = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"))
         profile = json.loads((ROOT / "profiles/default.json").read_text(encoding="utf-8"))
-        adapters = json.loads((ROOT / "adapters/index.json").read_text(encoding="utf-8"))
         self.assertEqual(1, registry["schema_version"])
         self.assertEqual(set(profile["models"]), set(registry["models"]))
-        self.assertGreaterEqual(len(adapters["adapters"]), 1)
-        self.assertTrue(all(adapter["patch_strategy"] == "exact" for adapter in adapters["adapters"]))
         self.assertTrue(
             registry["models"]["deepseek/deepseek-v4-flash-0731"][
                 "supports_parallel_tool_calls"
@@ -78,12 +75,6 @@ class RepositoryTests(unittest.TestCase):
             ["text", "image"],
             registry["models"]["moonshotai/kimi-k3"]["codex_modalities"],
         )
-
-    def test_upstream_license_contract_is_unlicense(self) -> None:
-        manifest = json.loads((ROOT / "portable/manifest.json").read_text(encoding="utf-8"))
-        upstream = manifest["upstream_patcher"]
-        self.assertEqual("Unlicense", upstream["license"])
-        self.assertRegex(upstream["license_sha256"], r"^[0-9a-f]{64}$")
 
     def test_network_doctor_verifies_request_zdr_generation_provider(self) -> None:
         source = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(encoding="utf-8")
@@ -177,31 +168,32 @@ class RepositoryTests(unittest.TestCase):
             doctor.matching_processes(f"{real}\n{wrapper}\n", executable),
         )
 
-    def test_launcher_process_match_is_anchored_to_command_start(self) -> None:
+    def test_launcher_delegates_to_supervisor_and_never_touches_the_stock_app(self) -> None:
+        """ランチャーは純正appを検証も改変もしない。事前処理はsupervisorが持つ。"""
         source = (ROOT / "portable/templates/codex-openrouter-app.zsh.in").read_text(
             encoding="utf-8"
         )
-        self.assertIn("codex_openrouter.processes", source)
-        self.assertIn('--executable "$EXECUTABLE"', source)
+        self.assertIn("codex_openrouter.cli launch", source)
+        self.assertIn("unset OPENROUTER_API_KEY", source)
         self.assertNotIn("/bin/ps -axo pid=,command=", source)
+        # ASARパッチ方式の検証は全て不要になった。
+        for retired in ("app.asar", "PATCH_MARKER", "patched_asar", "adapter.json", "codesign"):
+            self.assertNotIn(retired, source)
 
-    def test_runtime_rebuild_has_no_build_specific_literals(self) -> None:
-        source = (ROOT / "portable/templates/codex-openrouter-rebuild.zsh.in").read_text(encoding="utf-8")
-        self.assertIn("$ACTIVE_ADAPTER", source)
-        self.assertIn('active adapter is not exactly present in index', source)
-        self.assertNotIn("patch_build_6321.py", source)
-        self.assertNotIn('EXPECTED_BUILD="6321"', source)
-
-    def test_upgrade_validates_staging_files_with_final_runtime_paths(self) -> None:
-        renderer = (ROOT / "portable/render_runtime.py").read_text(encoding="utf-8")
+    def test_upgrade_promotes_runtime_files_without_touching_the_stock_app(self) -> None:
+        """案Dでは純正appを一切置換しない。upgradeの対象は自前のruntimeだけ。"""
         upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
-        doctor = (ROOT / "portable/templates/codex-openrouter-doctor.py.in").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('parser.add_argument("--runtime-home", type=Path)', renderer)
-        self.assertIn('"--runtime-home",', upgrade)
-        self.assertIn('"CODEX_OPENROUTER_RUNTIME_HOME": str(paths.codex_home)', upgrade)
-        self.assertIn("RUNTIME_CATALOG = RUNTIME_HOME", doctor)
+        self.assertIn("(stage_support, paths.support_root)", upgrade)
+        self.assertIn("paths.desktop_launcher", upgrade)
+        # ASARパッチ方式の痕跡が残っていないこと。
+        for retired in (
+            "patched_asar_sha256",
+            "adapters/index.json",
+            "portable/manifest.json",
+            "ChatGPT OpenRouter Candidate.app",
+            "render_runtime.py",
+        ):
+            self.assertNotIn(retired, upgrade)
 
     def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")

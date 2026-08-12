@@ -22,13 +22,8 @@ jobs:
         run: PYTHONPATH=src python3 -m unittest discover -s tests -v
       - name: Python syntax
         run: python3 -m compileall -q src portable scripts
-      - name: Semantic patcher tests
-        working-directory: portable/patcher-js
-        run: npm ci --ignore-scripts && npm test
       - name: Tree and history secret scan
         run: python3 scripts/secret_scan.py --tree . --git-history
-      - name: Pinned source and license audit
-        run: python3 scripts/audit_upstream.py
       - name: Build and scan release archive
         run: |
           release_version="v$(tr -d '\n' < VERSION)"
@@ -52,7 +47,6 @@ jobs:
         run: |
           zsh -n portable/install.sh
           zsh -n portable/templates/codex-openrouter-app.zsh.in
-          zsh -n portable/templates/codex-openrouter-rebuild.zsh.in
           zsh -n portable/launcher/build_icon.zsh
       - name: Synthetic upgrade, promotion, and rollback E2E
         run: PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py

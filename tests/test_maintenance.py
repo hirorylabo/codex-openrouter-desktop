@@ -5,7 +5,6 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from codex_openrouter.app import StockBuild, load_adapter
 from codex_openrouter.processes import matching_processes
 from codex_openrouter.promotion import PromotionError, atomic_promote, rollback_replacements
 from scripts.build_release import validate_release_version
@@ -21,24 +20,6 @@ class VersionAndAdapterTests(unittest.TestCase):
         for invalid in ("0.1.1", "v0.01.1", "v0.1.0", "v1.2.3-rc1"):
             with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
                 validate_release_version(invalid)
-
-    def test_each_adapter_patcher_contract_matches_index(self) -> None:
-        document = json.loads((ROOT / "adapters/index.json").read_text(encoding="utf-8"))
-        self.assertGreaterEqual(len(document["adapters"]), 1)
-        for adapter in document["adapters"]:
-            patcher = ROOT / adapter["patcher"]
-            source = patcher.read_text(encoding="utf-8")
-            self.assertIn(f'EXPECTED_VERSION = "{adapter["chatgpt_version"]}"', source)
-            self.assertIn(f'EXPECTED_BUILD = "{adapter["chatgpt_build"]}"', source)
-            self.assertIn(adapter["stock_asar_sha256"], source)
-            self.assertIn(adapter["marker"], source)
-            stock = StockBuild(
-                Path("/Applications/ChatGPT.app"),
-                adapter["chatgpt_version"],
-                str(adapter["chatgpt_build"]),
-                adapter["stock_asar_sha256"],
-            )
-            self.assertEqual(adapter, load_adapter(ROOT / "adapters/index.json", stock))
 
 
 class ProcessTests(unittest.TestCase):
