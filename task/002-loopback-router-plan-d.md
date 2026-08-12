@@ -2,11 +2,35 @@
 
 作成日: 2026-08-12 / ブランチ: `codex/build-6396-adapter` / 対象: ChatGPT `26.803.61601` build `6396`
 
-Status: **Phase 1 前半完了 / 撤去はPhase 3へ再配置**
+Status: **完了（Phase 1〜4）**
 
-- 完了: archive tag `archive/asar-patch-003a0bc` を push（SHA保全）
-- 完了: `configblock.py`（16 test）、`catalog.py`（18 test）、`UserPaths` 拡張。全64 test PASS
-- 再配置: ASAR資産の撤去は **Phase 3** へ移した。理由は下の「実装中に判明した順序の訂正」
+| Phase | 内容 | 結果 |
+|---|---|---|
+| 1 | archive tag / `configblock.py` / `catalog.py` / `UserPaths` 拡張 | 完了 |
+| 2 | `guard.py` / `watcher.py` | 完了 |
+| 3 | `supervisor.py` / ASAR資産撤去 / `upgrade.py`・`cli.py` 書き換え / CIからNode除去 | 完了 |
+| 4 | 実機E2E 21件 / README / v0.2.0 | 完了 |
+
+- archive tag `archive/asar-patch-003a0bc` を push 済み（撤去した資産のSHAを保全）
+- unit 105 test PASS、secret scan（tree + git history）PASS、compileall PASS
+- 実機E2E 21/21 PASS（`scripts/macos_live_e2e.py`）
+
+実機E2Eで確認できた核心:
+
+- picker に native 5 + OR 5 が並ぶ（ASARパッチ無し）
+- **nativeのturnはguardに着弾しない**。threadは `openai` に束縛される
+- watcherが `model_provider` を追随させる
+- **provider境界をまたいだnative turn（`gpt-5.6-sol`）をguardが遮断した**。threadがopenrouter束縛でturnがnative slugという、案Dで最も危険な経路を実トラフィックで止めたことを確認
+- **巻き込んだ背景thread（`gpt-5.6-luna`）もguardが遮断した**
+- 終了後に catalog block が消え純正起動はvanilla、provider block は残る
+
+### 残課題
+
+- guard の **中継（forward）経路** は unit test と Phase 0-C の実測で確認済みだが、実機E2Eでは
+  ダミー鍵を使っているため OpenRouter への実往復は未実施。課金が発生するため意図的に外した
+- `configblock.edit` には理論上の lost update 窓が残る。純正appは自前lockを取らないため。
+  実運用条件では計測上ゼロ、両者が同一マイクロ秒で開始する人工条件でのみ再現。
+  失っても routing は安全側のままで誤送信にはならない
 
 関連: [LOOPBACK_ROUTER_PLAN.md](../LOOPBACK_ROUTER_PLAN.md) §10（案Dの実測根拠）、[SESSION_CONTINUITY_PLAN.md](../SESSION_CONTINUITY_PLAN.md)（案A・退避経路）
 
