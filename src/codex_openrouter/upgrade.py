@@ -90,11 +90,15 @@ def _write_json(path: Path, document: dict) -> None:
     path.chmod(0o600)
 
 
-def build_launcher(source_root: Path, target: Path, workspace: Path) -> None:
+def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: Path) -> None:
     """Desktopに置くランチャー専用バンドルを組み立てる。
 
     純正appのcloneではない。事前処理をしてから /Applications/ChatGPT.app を
     起動するだけの薄いバンドル。
+
+    workspaceとlog pathはInfo.plistへ焼き込む。Swift側に同じpathを書くと、
+    Pythonが出所であるはずのpathが二重定義になり、v0.2.0のように片方だけ
+    取り残される。
     """
     executable = target / "Contents/MacOS/CodexOpenRouterLauncher"
     executable.parent.mkdir(parents=True)
@@ -111,16 +115,11 @@ def build_launcher(source_root: Path, target: Path, workspace: Path) -> None:
             str(resources / "AppIcon.icns"),
         ]
     )
-    run(
-        [
-            "/usr/bin/plutil",
-            "-replace",
-            "CodexDefaultWorkspace",
-            "-string",
-            str(workspace),
-            str(plist),
-        ]
-    )
+    for key, value in (
+        ("CodexDefaultWorkspace", str(workspace)),
+        ("CodexLauncherLog", str(log_path)),
+    ):
+        run(["/usr/bin/plutil", "-replace", key, "-string", value, str(plist)])
     run(
         [
             "/usr/bin/xcrun",
@@ -231,7 +230,7 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
         )
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
 
-        build_launcher(source_root, stage_launcher, workspace)
+        build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")
 
         replacements: list[tuple[Path, Path]] = [(stage_support, paths.support_root)]
         replacements.extend((stage_bin / name, paths.bin_dir / name) for name in BINARIES)

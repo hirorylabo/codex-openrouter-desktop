@@ -7,9 +7,12 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
     private lazy var defaultWorkspace =
         Bundle.main.object(forInfoDictionaryKey: "CodexDefaultWorkspace") as? String
         ?? "\(userHome)/Documents"
-    private lazy var cloneExecutablePath =
-        "\(userHome)/Applications/ChatGPT OpenRouter.app/Contents/MacOS/ChatGPT"
-    private lazy var launcherLogPath = "\(userHome)/.codex-openrouter/logs/launcher.log"
+    // 案Dでは専用cloneを作らない。前面化の相手は純正appそのもの。
+    private let stockAppURL = URL(fileURLWithPath: "/Applications/ChatGPT.app").standardizedFileURL
+    // 出所は UserPaths.state_dir。build_launcher がInfo.plistへ書く。
+    private lazy var launcherLogPath =
+        Bundle.main.object(forInfoDictionaryKey: "CodexLauncherLog") as? String
+        ?? "\(userHome)/.local/share/codex-openrouter-desktop/state/logs/launcher.log"
     private var receivedWorkspace = false
     private var launchInProgress = false
 
@@ -63,6 +66,11 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
             return
         }
 
+        // supervisorは self-heal → catalog再生成 → guard起動 を済ませてから純正appを
+        // 起動する。Codex更新直後は catalog再生成の分だけ待たされるので、出てくるまで
+        // ポーリングする。プロセスが先に終われば打ち切る。
+        pollForStockWindow(process: process, deadline: Date().addingTimeInterval(60))
+
         DispatchQueue.global(qos: .userInitiated).async {
             process.waitUntilExit()
             let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -74,19 +82,32 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
                         "起動または検証に失敗しました。\n\n" +
                         String(output.suffix(4000)) + "\n\n詳細: \(self.launcherLogPath)"
                     )
-                } else {
-                    self.activateOpenRouterWindow()
                 }
                 NSApplication.shared.terminate(nil)
             }
         }
     }
 
-    private func activateOpenRouterWindow() {
-        let application = NSWorkspace.shared.runningApplications.first {
-            $0.executableURL?.path == cloneExecutablePath
+    /// 純正appが現れるまで待って一度だけ前面へ出す。
+    private func pollForStockWindow(process: Process, deadline: Date) {
+        guard process.isRunning else { return }
+        if activateStockWindow() { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.pollForStockWindow(process: process, deadline: deadline)
         }
-        application?.activate(options: [.activateAllWindows])
+    }
+
+    /// supervisorはbundle内のexecutableを直接起動するが、bundleURLは .app を指す。
+    @discardableResult
+    private func activateStockWindow() -> Bool {
+        guard let application = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleURL?.standardizedFileURL == stockAppURL
+        }) else {
+            return false
+        }
+        application.activate(options: [.activateAllWindows])
+        return true
     }
 
     private func showError(_ message: String) {

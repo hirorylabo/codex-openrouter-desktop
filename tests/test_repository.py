@@ -177,6 +177,27 @@ class RepositoryTests(unittest.TestCase):
                     missing.append(f"{path.relative_to(ROOT)} -> {referenced}")
         self.assertEqual([], missing)
 
+    def test_desktop_launcher_has_no_legacy_clone_references(self) -> None:
+        """Swiftのentry pointも案Dへ追従していること。
+
+        v0.2.0で旧clone appと旧homeを撤去したとき、このファイルだけが取り残されて
+        削除済みpathを指したままになっていた。CIは swiftc のコンパイルしか見ないので
+        落ちず、直前に足した path 実在テストは src/**/*.py しか走査していなかった。
+        """
+        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
+            encoding="utf-8"
+        )
+        for retired in ("ChatGPT OpenRouter.app", ".codex-openrouter"):
+            self.assertNotIn(retired, swift)
+        # pathの出所はPython側（UserPaths）。Swiftはplist経由で受け取るだけ。
+        self.assertIn("CodexLauncherLog", swift)
+        self.assertIn(
+            "CodexLauncherLog", (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
+        )
+        upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
+        self.assertIn("CodexLauncherLog", upgrade)
+        self.assertIn('state_dir / "logs/launcher.log"', upgrade)
+
     def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
         upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")

@@ -160,7 +160,7 @@ def install(
         run([python, "-m", "py_compile", str(stage_bin / "codex-openrouter-doctor")])
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
 
-        build_launcher(source_root, stage_launcher, workspace)
+        build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")
 
         replacements: list[tuple[Path, Path]] = [(stage_support, paths.support_root)]
         replacements.extend((stage_bin / name, paths.bin_dir / name) for name in BINARIES)
