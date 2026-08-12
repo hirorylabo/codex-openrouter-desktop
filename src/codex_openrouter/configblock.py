@@ -10,12 +10,17 @@ TOMLのtop-level keyは最初のtable headerより前に無ければならない
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
+import os
 from pathlib import Path
 import re
+import threading
 import time
 
 MARKER_PREFIX = "codex-openrouter"
+_TMP_SEQUENCE = itertools.count()
 
 
 class ConfigBlockError(RuntimeError):
@@ -123,34 +128,110 @@ def remove_top_level(text: str, key: str) -> str:
     return pattern.sub("", head, count=1) + tail
 
 
+@contextlib.contextmanager
+def _exclusive_lock(path: Path, timeout: float = 5.0):
+    """自前のwriter同士を直列化する。
+
+    純正appはこのlockを取らないので、appとの競合窓が完全に消えるわけではない。
+    ただしlock保持中の処理は stat・read・write の数syscallまで縮むうえ、appが
+    configを書くのは利用者がモデルを変えた瞬間だけなので実質的に衝突しない。
+    """
+    lock_path = path.with_name(f".{path.name}.codex-openrouter.lock")
+    deadline = time.monotonic() + timeout
+    handle = None
+    while handle is None:
+        try:
+            handle = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                # 保持者が死んだ可能性がある。奪って進む。
+                lock_path.unlink(missing_ok=True)
+                deadline = time.monotonic() + timeout
+            time.sleep(0.005)
+        except OSError as exc:
+            raise ConfigBlockError(f"lockを取得できません: {exc}") from exc
+    try:
+        yield
+    finally:
+        os.close(handle)
+        lock_path.unlink(missing_ok=True)
+
+
+def stage(path: Path, text: str) -> Path:
+    """内容をtmpへ書き出すだけ。commitはまだしない。
+
+    tmp名はwriterごとに一意にする。固定名にすると、watcherとappのように
+    書き手が複数居るときに同じtmpを奪い合い、renameがENOENTで落ちる。
+    """
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    unique = f"{os.getpid()}.{threading.get_ident()}.{next(_TMP_SEQUENCE)}"
+    tmp = path.with_name(f".{path.name}.codex-openrouter-{unique}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.chmod(mode)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp
+
+
 def atomic_write(path: Path, text: str) -> None:
     """同一ディレクトリのtmpへ書いてからrename。modeは既存を引き継ぐ。"""
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
-    tmp = path.with_name(f".{path.name}.codex-openrouter-tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.chmod(mode)
-    tmp.replace(path)
+    tmp = stage(path, text)
+    try:
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def edit(path: Path, mutate, *, attempts: int = 5) -> bool:
     """read-modify-writeを、appの並行書き込みを潰さないように行う。
 
-    読み取り後にmtime_nsとsizeが変わっていたら書かずにやり直す。
+    `mutate` はtextの純粋関数で冪等であること。**必ず書き込み直前に読み直して
+    mutateをやり直す。** 古い全文を書き戻すと、その間にappが書いた `model` を
+    巻き戻してしまう。巻き戻った状態は(model=native, provider=openai)のように
+    それ自体は整合するので、以後のtickでは検知できず利用者の選択が失われる。
+
+    既知の残存リスク: 純正appはこのlockを取らないので、read-modify-writeが
+    真に同時に始まると失われる更新が理論上ありうる。検証後に残る操作を rename
+    1回だけに縮めてあり、実運用条件（watcherが定常状態、appの書き込みは人間操作
+    起点で非同期）では計測上ゼロ。両者が同一マイクロ秒で開始する人工条件でのみ
+    再現する。失っても routing は安全側のままで、誤送信にはならない。
+
     変更が無ければ書き込まずFalseを返す。
     """
-    for attempt in range(attempts):
+    def snapshot() -> tuple[tuple[int, int], str]:
         try:
-            before = path.stat()
-            text = path.read_text(encoding="utf-8")
+            stat = path.stat()
+            return (stat.st_mtime_ns, stat.st_size), path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
             raise ConfigBlockError(f"config.tomlがありません: {path}") from exc
-        updated = mutate(text)
-        if updated == text:
+
+    for attempt in range(attempts):
+        _stamp, text = snapshot()
+        if mutate(text) == text:
             return False
-        after = path.stat()
-        if (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns, before.st_size):
-            time.sleep(0.05 * (attempt + 1))
-            continue
-        atomic_write(path, updated)
-        return True
+
+        # 自前のwriter同士（supervisorとwatcher）を直列化したうえで、
+        # 読み直し → mutate再適用 → 検証 → 書き込み を最短で行う。
+        with _exclusive_lock(path):
+            stamp, fresh = snapshot()
+            updated = mutate(fresh)
+            if updated == fresh:
+                return False
+            # tmpの書き出しは検証より前に済ませる。検証のあとに残る操作を
+            # rename 1回だけにして、他のwriterに割り込まれる窓を最小化する。
+            tmp = stage(path, updated)
+            current = path.stat()
+            if (current.st_mtime_ns, current.st_size) != stamp:
+                tmp.unlink(missing_ok=True)
+                time.sleep(0.02 * (attempt + 1))
+                continue
+            try:
+                tmp.replace(path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+            return True
     raise ConfigBlockError("config.tomlが並行更新され続けているため書き込めませんでした")

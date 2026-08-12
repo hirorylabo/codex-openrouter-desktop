@@ -148,6 +148,33 @@ class EditTests(unittest.TestCase):
             path.write_text(LIVE_CONFIG, encoding="utf-8")
             self.assertFalse(configblock.edit(path, lambda text: text))
 
+    def test_edit_never_reverts_a_concurrent_write(self):
+        """mutate中にappがmodelを書いても、その変更を巻き戻してはいけない。
+
+        巻き戻った状態は (model=native, provider=openai) のようにそれ自体は
+        整合するので以後のtickでは検知できず、利用者の選択が永久に失われる。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(LIVE_CONFIG, encoding="utf-8")
+            state = {"n": 0}
+
+            def mutate(text: str) -> str:
+                state["n"] += 1
+                if state["n"] == 1:
+                    # 判定用のmutate中に、appがpicker選択を書いた状況を作る。
+                    configblock.atomic_write(
+                        path, configblock.upsert_top_level(text, "model", "z-ai/glm-5.2")
+                    )
+                return configblock.upsert_top_level(text, "model_provider", "openrouter")
+
+            configblock.edit(path, mutate)
+            final = path.read_text(encoding="utf-8")
+            self.assertEqual(configblock.read_top_level(final, "model"), "z-ai/glm-5.2")
+            self.assertEqual(
+                configblock.read_top_level(final, "model_provider"), "openrouter"
+            )
+
     def test_edit_retries_when_file_changes_under_it(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
