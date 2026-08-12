@@ -18,7 +18,7 @@ function parseBundle(source, label) {
   try {
     return parse(source, {
       ecmaVersion: "latest",
-      sourceType: "script",
+      sourceType: "module",
       allowAwaitOutsideFunction: true,
       allowReturnOutsideFunction: true,
     });
@@ -61,11 +61,15 @@ function planRouting(source, ast) {
     if (node.body?.type !== "BlockStatement" || node.params.length < 2) return false;
     if (node.params[0].type !== "Identifier" || node.params[1].type !== "Identifier") return false;
     const text = source.slice(node.body.start, node.body.end);
-    return (
+    const legacyShape =
       text.includes("thread/start") &&
       text.includes("config/read") &&
-      text.includes("useHostRequestScheduler")
-    );
+      text.includes("useHostRequestScheduler");
+    const queuedRequestShape =
+      text.includes("mcp_request_queue_full") &&
+      text.includes("queuedRequests.push") &&
+      text.includes("useHostRequestScheduler");
+    return legacyShape || queuedRequestShape;
   });
   if (matches.length !== 1) fail(`thread routing anchor matched ${matches.length} functions`);
   const node = matches[0];
@@ -114,19 +118,29 @@ function planVisibility(source, ast) {
 
 function planLabelFallback(source, ast) {
   const candidates = [];
+  const inspectMessageId = (ancestors) => {
+    for (let index = ancestors.length - 2; index >= 0; index -= 1) {
+      const ancestor = ancestors[index];
+      if (ancestor.type !== "LogicalExpression" || ancestor.operator !== "??") continue;
+      let left = ancestor.left;
+      if (left.type === "ChainExpression") left = left.expression;
+      if (left.type !== "MemberExpression" || left.computed) continue;
+      if (left.property.type !== "Identifier" || left.property.name !== "displayName") continue;
+      const objectText = source.slice(left.object.start, left.object.end);
+      candidates.push({ node: ancestor.right, objectText });
+      return;
+    }
+  };
   walk.ancestor(ast, {
     Literal(node, ancestors) {
-      if (node.value !== "composer.mode.local.model.custom") return;
-      for (let index = ancestors.length - 2; index >= 0; index -= 1) {
-        const ancestor = ancestors[index];
-        if (ancestor.type !== "LogicalExpression" || ancestor.operator !== "??") continue;
-        let left = ancestor.left;
-        if (left.type === "ChainExpression") left = left.expression;
-        if (left.type !== "MemberExpression" || left.computed) continue;
-        if (left.property.type !== "Identifier" || left.property.name !== "displayName") continue;
-        const objectText = source.slice(left.object.start, left.object.end);
-        candidates.push({ node: ancestor.right, objectText });
-        return;
+      if (node.value === "composer.mode.local.model.custom") inspectMessageId(ancestors);
+    },
+    TemplateLiteral(node, ancestors) {
+      if (
+        node.expressions.length === 0 &&
+        node.quasis[0]?.value?.cooked === "composer.mode.local.model.custom"
+      ) {
+        inspectMessageId(ancestors);
       }
     },
   });
