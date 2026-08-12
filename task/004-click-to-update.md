@@ -2,7 +2,7 @@
 
 作成日: 2026-08-12 / ブランチ: `codex/build-6396-adapter`
 
-Status: **実装完了・自動検証PASS。実機での初回反映（手動upgrade 1回）は未実施**
+Status: **完了。自動検証PASS + 実機で全パス確認済み（v0.2.0として稼働中）**
 
 ## Context
 
@@ -46,12 +46,21 @@ manifest の `source_root` を読み、ディレクトリでない・home配下�
 - `compileall` / `zsh -n` / `swiftc` / `secret_scan --tree --git-history` すべてPASS
 - 実機ドライラン（`upgrade` をmock）: 現行manifestは schema 3 で `source_root` 未記録のため `auto_upgrade` は何もせず0を返す。digestは repo `401e3902` / installed `e03706c1` で正しく差分として出る
 
-実機の残り:
+### 実機結果（2026-08-12）
 
-1. 初回反映は手動で1回だけ必要（自動更新のコード自体がまだ導入されていないため）: ChatGPT.appを終了 → `cd <repo> && ./codex-openrouter upgrade`
-2. repoを1文字変える → クリック → HUDが出て約10秒後にChatGPTが前面に来る
-3. 再クリック → HUDは出ず即起動（digest一致でskip）
-4. 失敗系: 一時的な構文エラーを入れてクリック → rollbackされても起動する → 再クリックでは再試行しない
+初回反映は手動で1回だけ実施（自動更新のコード自体がまだ導入されていないため）。以降は `upgrade --if-needed` を実経路で回して確認した。
+
+| 検証 | 結果 |
+|---|---|
+| 初回の手動 upgrade | `UPGRADE: PASS`、manifestが schema 4 + `source_root` 記録 |
+| 差分なし | 0.5秒で素通し（出力なし） |
+| 差分あり | `STATUS: updating` → `UPGRADE: PASS` → `STATUS: launching`、13.0秒 |
+| 更新が失敗（`doctor.py` に構文エラーを注入） | promotion後のverifyで検出 → **自動rollback**、`exit=0` で起動は続行 |
+| 失敗後の再実行 | 「同じ内容で失敗済みのためskip」0.13秒 |
+| 失敗後の健全性 | installed digest不変（`401e3902`）、`doctor RESULT: PASS`（picker 10件） |
+| 最終状態 | repo と installed のdigest一致、`selfupdate.json` は success |
+
+設計の要である「更新に失敗しても起動は止まらない」を、実際に壊して確認した。Finderからのクリック操作そのもの（HUDの見た目と前面化）は未確認。
 
 ## スコープ外
 

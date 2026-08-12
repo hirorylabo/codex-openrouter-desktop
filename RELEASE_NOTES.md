@@ -12,6 +12,16 @@ Codexは週2回以上更新され、そのたびにsemantic anchorの再解析�
 - 専用cloneアプリは作りません。`~/Applications/ChatGPT OpenRouter.app` は不要です
 - 特定buildへの固定がなくなりました。更新時はversion/buildの差分を見てcatalogを組み直すだけです
 
+## クリック起動時の自動更新
+
+リポジトリから導入した場合、導入元のpathが `install-manifest.json` に記録されます。以降は `Codex OpenRouter.app` をクリックするたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします。差分が無ければ何もせず起動します（実測0.5秒）。更新が要るときは進行状況の小窓が出て、実測13秒で反映されます。
+
+- 自動経路では実課金のAPI往復を行いません
+- **更新に失敗しても起動は止まりません。** `atomic_promote` のverifyが落ちれば直前の状態へ自動rollbackします。同じ内容で一度失敗したら、内容が変わるまで再試行しません
+- 手動で `codex-openrouter upgrade` を打つ場合は、**リポジトリの `./codex-openrouter` を使ってください。** `PATH` 上の `codex-openrouter` は導入元を導入済みツリー自身へ解決するため、そのまま実行しても内容は新しくなりません（警告を表示します）
+
+リリース版導入やリポジトリを削除した環境では、記録された導入元が無いので何もせず素通しします。
+
 ## 移行
 
 ```bash
@@ -34,6 +44,8 @@ guardは許可集合以外を**1バイトも外へ出さずに**止めます。`
 - **Node.js/npm依存を全廃**しました。CIからnpm・semantic patcher tests・pinned source auditの3ステップが消えています
 - テンプレートに埋まっていた1366行（doctor 595行 / refresh 771行）を `src/` の実モジュールへ移し、CIから直接unittestできるようにしました
 - 初回インストールと更新を1本の経路へ統合しました（`portable/install.sh` は撤去）
+- `copy_support`（運ぶ側）と `runtime_digest`（比べる側）が同じ定数を見るようにし、片方だけ対象が増えて検出漏れになる事故をテストで塞ぎました
+- ランチャーが表示するlog pathを Info.plist 経由にし、Pythonの `UserPaths` を唯一の出所にしました
 
 撤去したASARパッチ資産は archive tag `archive/asar-patch-003a0bc` に保全してあります。
 
