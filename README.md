@@ -76,7 +76,7 @@ sourceから使う場合も、Release archiveと同じallowlistを推奨しま�
 ./codex-openrouter setup --auth paste --workspace "$HOME/Documents"
 ```
 
-keyはmacOS Keychainのservice `io.github.hirorylabo.codex-openrouter-desktop`へ保存されます。`--api-key`、`.env`、shell profile、config、logへ保存しません。Codexからはcredential helperを使うcommand-backed authenticationで取得します。
+keyはmacOS Keychainのservice `io.github.hirorylabo.codex-openrouter-desktop`へ保存されます。`--api-key`、`.env`、shell profile、config、logへ保存しません。実keyを取得するのはローカルguardだけです。Codexからguardへは起動ごとの別tokenを送り、実keyはloopbackを通りません。
 
 ## CLI
 
@@ -119,6 +119,8 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 
 API keyから見えるconcrete model集合がprofileと完全一致しない場合、導入を停止します。
 
+正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。通常upgradeとクリック時の自動upgradeはこのprofileを維持します。明示的な`upgrade --profile default|FILE`だけが置き換え、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
+
 ## 更新と移行
 
 Codexは週2回以上更新されます。ASARパッチ方式はそのたびにanchor再解析とhash再生成が要り保守が破綻するため、v0.2.0で撤去しました。現在は起動のたびに`CFBundleShortVersionString`と`CFBundleVersion`を前回値と照合し、変わっていればcompositeカタログを組み直します（ASAR hashは取りません）。
@@ -134,6 +136,8 @@ codex-openrouter migrate
 圧縮では`sessions`（旧threadの記録）と`memories`/`goals`/`state`のsqliteを残し、ASARパッチ方式の`candidates`・旧clone appの`user-data`・`plugins`・logsを削除します。`--keep-all`で圧縮を抑止できます。実機では9.3GBが194MBになりました。
 
 `[model_providers.openrouter]`は終了後も残ります。消すとOpenRouterで記録済みのthreadのresumeが`Model provider ... not found`でハードエラーになるためです。pickerからOpenRouterが消えるのはcatalog blockを外すからで、この2つは寿命が違います。
+
+非稼働時のproviderは`127.0.0.1:0`と必ず失敗する認証commandを持つ非接続stubです。起動中だけguardのephemeral portと0600の起動tokenへ切り替え、通常終了ではstubへ戻してからguardを停止します。`SIGKILL`や電源断では次回の専用起動時にself-healします。その間も実API keyはloopbackへ送られませんが、同一ユーザー権限の悪性プロセスに対するpromptのローカル捕捉余地は残ります。
 
 ## 巻き込みの確認
 
@@ -161,7 +165,9 @@ codex-openrouter auth logout
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-cd portable/patcher-js && npm ci --ignore-scripts && npm test
+PYTHONPATH=src python3 -m compileall -q src portable scripts
+python3 scripts/secret_scan.py --tree .
+python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```
 
 セキュリティ報告は[`SECURITY.md`](./SECURITY.md)、第三者コードは[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)を参照してください。

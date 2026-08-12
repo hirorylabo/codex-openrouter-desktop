@@ -85,3 +85,5 @@ guardの実往復は今回スコープ外（ローカル上流テストで代替
 ## スコープ外
 
 レビュー指摘 3（`install.py` と `upgrade.py` の90行二重化）、4（永続providerブロック + 固定port 8791 の露出面）、5（`start_guard` の死んだnonce分岐）、6（catalog blockのprovider block内への入れ子）。3 は次PRで扱う。
+
+> 2026-08-12追記: 上記の残件は[`task/005-pr1-integrated-lifecycle-refactor.md`](./005-pr1-integrated-lifecycle-refactor.md)で統合して解決した。

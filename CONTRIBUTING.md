@@ -11,10 +11,11 @@ IssueやPull Requestは日本語・英語どちらでも歓迎します。まず
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-cd portable/patcher-js && npm ci --ignore-scripts && npm test
+PYTHONPATH=src python3 -m compileall -q src portable scripts
 python3 scripts/secret_scan.py --tree .
+python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```
 
-実ChatGPT.appをCIへ追加しないでください。build adapterの実機E2Eは、stock署名/hash不変、candidateのみへのpatch、App Server、UI、network canary、rollbackを別々に記録します。
+実ChatGPT.appや実credentialをCIへ追加しないでください。実機E2Eは、純正appの署名不変、managed configのactive/inactive往復、profileとpicker/guard/watcherの一致、guardの許可・拒否、secret scan、rollbackを別々に記録します。
 
 セキュリティ問題はpublic issueではなくPrivate Vulnerability Reportingを使用してください。

@@ -65,3 +65,5 @@ manifest の `source_root` を読み、ディレクトリでない・home配下�
 ## スコープ外
 
 PR #1レビューの指摘3〜6（install/upgradeの90行二重化、永続providerブロックと固定port 8791、`start_guard` の死んだnonce分岐、catalog blockの入れ子）。ランチャーのPythonが pyenv shim 経由で Finder 下では 3.9.6 に解決される件も別途。
+
+> 2026-08-12追記: PR #1レビューの残件は[`task/005-pr1-integrated-lifecycle-refactor.md`](./005-pr1-integrated-lifecycle-refactor.md)で統合して解決した。FinderのPython解決は今回の5件には含めない。

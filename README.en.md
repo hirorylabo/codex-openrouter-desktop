@@ -3,15 +3,16 @@
 > [!WARNING]
 > **This is an unofficial, experimental workaround. It is not endorsed by or affiliated with OpenAI or OpenRouter.** The first release supports Apple Silicon macOS only. A ChatGPT.app update may stop it from working, and the software is provided without warranty. OpenAI, ChatGPT, Codex, OpenRouter, and model names are trademarks of their respective owners.
 
-This CLI creates a dedicated local clone, `CODEX_HOME`, and Electron userData directory without modifying the official signed `/Applications/ChatGPT.app`, then connects the clone to an OpenRouter custom provider. The project does not distribute ChatGPT.app, ASAR files, API keys, cookies, history, userData, or logs.
+This CLI leaves the official signed `/Applications/ChatGPT.app` untouched. A marker block in `~/.codex/config.toml` and a local guard add verified OpenRouter models to the stock model picker only while the dedicated launcher is running. It creates no clone and patches no ASAR. The project does not distribute ChatGPT.app, ASAR files, API keys, cookies, history, userData, or logs.
 
 [日本語](./README.md)
 
 ## Scope
 
 - Apple Silicon macOS only; no Windows, Linux, Intel Mac, or Homebrew support.
-- `v0.2.0` is a prerelease. The only known build is ChatGPT `26.803.41515` build `6321`.
-- Unknown-build semantic candidates are best effort and never modify the stock app or promote without visual confirmation.
+- `v0.2.0` is a prerelease. It no longer pins a specific ChatGPT build because ASAR patching was removed.
+- While an OpenRouter model is selected, stock background threads bound to the same provider are rejected by the allowlist guard. Those background features are unavailable for that period.
+- Switching across the native/OpenRouter provider boundary inside an existing thread fails; start a new thread instead.
 - OpenRouter usage charges are the user's responsibility. Network doctor and candidate canaries may incur a small charge.
 
 ## Verified download
@@ -44,7 +45,7 @@ Install the official signed ChatGPT.app, Xcode Command Line Tools, and Python 3.
 ./codex-openrouter setup --auth paste --workspace "$HOME/Documents"
 ```
 
-OAuth uses PKCE S256 with a temporary random-port `127.0.0.1` callback. The API key is stored only in macOS Keychain under service `io.github.hirorylabo.codex-openrouter-desktop`. Codex obtains it through a credential helper; command-line key arguments, `.env`, shell profiles, configuration, and logs are not supported.
+OAuth uses PKCE S256 with a temporary random-port `127.0.0.1` callback. The API key is stored only in macOS Keychain under service `io.github.hirorylabo.codex-openrouter-desktop`. Only the local guard retrieves it. Codex authenticates to the running guard with a separate launch-scoped token, so the OpenRouter key never crosses loopback. Command-line key arguments, `.env`, shell profiles, configuration, and logs are not supported.
 
 When Finder's desktop stacks are enabled, the launcher appears inside the Applications stack. Turn off **Finder > View > Use Stacks** to keep it directly visible. Setup and upgrade regenerate its project icon, signature, and default workspace.
 
@@ -55,16 +56,17 @@ codex-openrouter check
 codex-openrouter setup [--workspace PATH] [--profile default|FILE] [--auth oauth|paste]
 codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
-codex-openrouter update
-codex-openrouter upgrade [--profile default|FILE]
+codex-openrouter migrate
+codex-openrouter guard-log [--clear]
+codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
 
-Custom profiles may only select models already present in [`models/registry.json`](./models/registry.json). Before any application write, the CLI requires the API key's effective concrete model set to exactly match the profile.
+Custom profiles may only select models already present in [`models/registry.json`](./models/registry.json). Before any application write, the CLI requires the API key's effective concrete model set to exactly match the profile. The normalized installed profile drives the picker, guard, watcher, and doctor. A normal or automatic upgrade preserves it; an explicit `upgrade --profile ...` replaces it. A changed profile applies its default model once on the next dedicated launch.
 
-For a known build, `update` dispatches to `upgrade`. After downloading a newer release, close the dedicated app and run `./codex-openrouter upgrade`. It validates the runtime, configuration, and any new known adapter app in staging, switches each target transactionally, retains recoverable originals, and automatically rolls back every switched target if the post-switch doctor fails. A successful upgrade can also be reverted with `codex-openrouter rollback`. Rebuild resolves its patcher from an exact match between the active adapter and `adapters/index.json`.
+After downloading a newer release or updating a source checkout, close ChatGPT.app and run the repository's `./codex-openrouter upgrade`. Runtime files, the launcher, manifest, installed profile, and supervisor state are staged and promoted transactionally. Verification failure restores every promoted target. `codex-openrouter rollback` restores the previous promoted set.
 
-Unknown builds are patched only in an isolated candidate using three single-match semantic anchors. Signature, ASAR integrity, exact App Server model inventory, every published reasoning effort, request-level ZDR, and the actual ZDR provider are checked before visual confirmation. Promotion requires typing `PROMOTE`; a failed post-promotion doctor automatically restores the prior app and runtime configuration.
+When the launcher is inactive, the persistent provider definition points to non-connecting port `0` and its authentication command always fails. During a launch, the guard binds an ephemeral loopback port; normal cleanup restores the inactive stub before stopping the guard. After a forced kill or power loss, the next dedicated launch performs the same self-heal before starting ChatGPT.app.
 
 See the Japanese README for the full operational details, [`SECURITY.md`](./SECURITY.md) for vulnerability reporting, and [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for third-party licensing.
