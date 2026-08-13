@@ -135,9 +135,30 @@ release build、`swiftc portable/launcher/app/*.swift`、`swiftc CredentialHelpe
   stateが存在しないcatalogを指していた問題
 - 設定画面テストの式そのものへの一致を外し、密着度を下げた
 
+### 実機で確認できたもの
+
+`2df1154` の直後（16:32:29）に利用者がDesktop launcherから起動し、
+`upgrade --if-needed` の自動更新がHEADをそのまま導入した。導入済みruntimeの
+`runtime_digest` はrepo HEADと一致する。
+
+- 自動更新のpromotionが実コードで成功した（`upgrade-backups/20260813-163229-v0.2.0`）
+- Desktop launcherが新しい複数ファイル構成のSwiftで再ビルドされ、`LSUIElement` を
+  持たない通常appになっている
+- 起動後のlauncher logに「モデルカタログを再生成しました（build 6396）」が出た。
+  旧stateに `catalog_profile_digest` が無いための再生成で、設計どおりの経路
+- OpenRouterモード稼働中に `profile show --json` が
+  `openrouter_active: true` / `editable: false` を返す
+
+一時ビルドしたbundleを実行しての確認（読み取り専用、`profile show` のみ）:
+
+- 管理画面が「表示モデル 5件 / 既定モデル: DeepSeek V4 Pro / workspace: ...」を表示
+- Appメニューが `Codex OpenRouterについて` / `設定…` / 隠す / 終了 で構成される
+- 「設定…」でモデル設定画面が開き、稼働中なので「ChatGPT終了後に変更できます。」を
+  表示して編集を止める
+- Auto Layoutのconstraint conflictもcrashも出ない（stderr空）
+
 ### 未実施
 
-実機の対話確認。`scripts/macos_installed_e2e.zsh` の `manual_checklist` に
-列挙した6項目（管理画面・`⌘,`・folder drop・純正appからのhandoff・秘密値非表示・
-純正app無改変）と launcher 2 cycle は、導入済みruntimeを
-`./codex-openrouter upgrade` で更新したうえで利用者が実行する。
+`scripts/macos_installed_e2e.zsh` の launcher 2 cycle と、目視項目のうち
+folder drop・純正appからのhandoff・純正app無改変。いずれもChatGPTの通常終了を
+含む対話操作なので利用者が実行する。
