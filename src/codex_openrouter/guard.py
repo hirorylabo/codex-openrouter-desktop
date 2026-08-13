@@ -78,8 +78,12 @@ class Guard:
         forwarder: Callable[[bytes, str], tuple[int, dict, object]] = forward_to_openrouter,
         nonce: str = "",
         access_token: str = "",
+        zdr_models: Iterable[str] | None = None,
     ):
         self.allowed = frozenset(allowed_models)
+        # 省略時は全modelへZDRを強制する。安全側が既定で、外すのは
+        # registryが「このmodelにZDR endpointは無い」と記録している場合だけ。
+        self.zdr = self.allowed if zdr_models is None else frozenset(zdr_models)
         self.key_provider = key_provider
         self.log_path = log_path
         self.forwarder = forwarder
@@ -102,12 +106,20 @@ class Guard:
                 handle.write(line + "\n")
 
     def prepare(self, body: bytes) -> bytes:
-        """ZDR強制。既存の provider 指定があれば尊重しつつ zdr を立てる。"""
+        """ZDRを持つmodelにだけ強制する。既存の provider 指定は尊重する。
+
+        以前は全リクエストへ無条件に立てていた。ZDR endpointを持たないmodelでは
+        それが必ず失敗を招く（OpenRouterが routing 先を見つけられない）ので、
+        registryが `zdr_supported: false` と記録したmodelでは立てない。
+        その判断はここではなくregistryとdoctorの側にあり、guardは従うだけにする。
+        """
         try:
             document = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return body
         if not isinstance(document, dict):
+            return body
+        if document.get("model") not in self.zdr:
             return body
         provider = document.get("provider")
         if not isinstance(provider, dict):

@@ -398,10 +398,13 @@ def check_network(doctor: Doctor, paths: UserPaths, registry_models: dict) -> No
         and isinstance(item.get("id"), str)
         and not item["id"].startswith(("openrouter/", "~"))
     }
+    # Guardrailは任意になったので、実効集合との完全一致は求めない。求めるのは
+    # 「選択中のmodelが全て呼べる」方向だけ。
+    missing = sorted(expected - concrete)
     doctor.expect(
-        concrete == expected,
-        "OpenRouter keyの実効model集合はregistryと完全一致します",
-        f"OpenRouter keyの実効model集合が不正です: {sorted(concrete)}",
+        not missing,
+        "選択中のmodelはすべてOpenRouter keyで呼び出せます",
+        f"OpenRouter keyで呼び出せないmodelがあります: {missing}",
     )
 
     for model in expected:
@@ -413,12 +416,19 @@ def check_network(doctor: Doctor, paths: UserPaths, registry_models: dict) -> No
             and e.get("status") == 0
             and isinstance(e.get("tag"), str)
         ]
+        spec = registry_models[model]
+        if not spec.get("zdr_supported", True):
+            # 利用者が明示的に選んだ非ZDR model。落とさずに、毎回それと分かるようにする。
+            doctor.warn(
+                f"{model} はZDRなしで動作します。"
+                "送信内容がproviderに保持される可能性があります"
+            )
+            continue
         if not endpoints:
             doctor.fail(f"稼働中のZDR endpointがありません: {model}")
             continue
         tags = sorted({e["tag"] for e in endpoints})
         providers = {e.get("provider_name") for e in endpoints}
-        spec = registry_models[model]
         effort = spec.get("default_effort")
         status, body, generation_id = request_model(key, model, effort, tags)
         if status != 200:

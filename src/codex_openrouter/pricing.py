@@ -20,6 +20,7 @@ import urllib.request
 
 PRICE_SCALE = Decimal(1_000_000)
 PRICE_NOTE = "価格はOpenRouter公表値で、実際の請求はOpenRouterの課金が正本。"
+ZDR_ABSENT_NOTE = "ZDRなし（送信内容がproviderに保持される可能性あり）"
 USER_AGENT = "codex-openrouter/2"
 
 
@@ -77,6 +78,12 @@ def fetch_json(url: str, timeout: float = 15.0) -> dict:
     return payload
 
 
+# prompt/completionは全modelが持つ。cache系は410件中244件しか公開していないので、
+# 欠けていても失敗にしない。ここで例外にすると、cache価格を出さないmodelを1件
+# 選んだだけで**全model**の価格がfallbackへ落ちる。
+REQUIRED_PRICE_KEYS = frozenset({"prompt", "completion"})
+
+
 def parse_headline(payload: dict, registry: dict) -> dict[str, dict[str, Decimal]]:
     data = payload.get("data")
     if not isinstance(data, list):
@@ -88,24 +95,42 @@ def parse_headline(payload: dict, registry: dict) -> dict[str, dict[str, Decimal
         item = by_id.get(slug)
         if not isinstance(item, dict):
             raise PricingUnavailableError(f"Models APIに {slug} がありません")
-        pricing = item.get("pricing")
-        if not isinstance(pricing, dict):
+        published = item.get("pricing")
+        if not isinstance(published, dict):
             raise PricingUnavailableError(f"{slug} のheadline価格がありません")
-        prices[slug] = {
-            key: validate_price(f"headline {label} for {slug}", pricing.get(api_key))
-            for key, (label, api_key) in components.items()
-        }
+        entry: dict[str, Decimal] = {}
+        for key, (label, api_key) in components.items():
+            if api_key not in published and api_key not in REQUIRED_PRICE_KEYS:
+                entry[key] = Decimal(0)
+                continue
+            entry[key] = validate_price(f"headline {label} for {slug}", published.get(api_key))
+        prices[slug] = entry
     return prices
 
 
+def zdr_capable(spec: dict) -> bool:
+    """registryが「このmodelはZDRで動く」と記録しているか。
+
+    既定はTrue。`zdr_supported` を持たない旧registryは全modelがZDR前提だった。
+    """
+    return bool(spec.get("zdr_supported", True))
+
+
 def parse_zdr(payload: dict, registry: dict) -> dict[str, dict[str, tuple[Decimal, str]]]:
-    """稼働中(status==0)のZDR endpointだけを見て、成分ごとの最安を選ぶ。"""
+    """稼働中(status==0)のZDR endpointだけを見て、成分ごとの最安を選ぶ。
+
+    非ZDR modelはそもそもZDR価格を持たないので、集合から外すだけにする。
+    ここで例外にすると、非ZDR modelを1件選んだだけで**全model**の価格が
+    fallbackへ落ちる。
+    """
     data = payload.get("data")
     if not isinstance(data, list):
         raise PricingError("ZDR endpoints APIにdata配列がありません")
     components = _components(registry)
     prices: dict[str, dict[str, tuple[Decimal, str]]] = {}
-    for slug in registry["models"]:
+    for slug, spec in registry["models"].items():
+        if not zdr_capable(spec):
+            continue
         active = [
             item
             for item in data
@@ -119,17 +144,20 @@ def parse_zdr(payload: dict, registry: dict) -> dict[str, dict[str, tuple[Decima
         for key, (label, api_key) in components.items():
             candidates: list[tuple[Decimal, str]] = []
             for endpoint in active:
-                pricing = endpoint.get("pricing")
-                if not isinstance(pricing, dict) or api_key not in pricing:
+                published = endpoint.get("pricing")
+                if not isinstance(published, dict) or api_key not in published:
                     continue
                 candidates.append(
                     (
-                        validate_price(f"ZDR {label} for {slug}", pricing[api_key]),
+                        validate_price(f"ZDR {label} for {slug}", published[api_key]),
                         validate_provider_name(endpoint.get("provider_name")),
                     )
                 )
             if not candidates:
-                raise PricingUnavailableError(f"{slug} の稼働中ZDR {label} 価格がありません")
+                if api_key in REQUIRED_PRICE_KEYS:
+                    raise PricingUnavailableError(f"{slug} の稼働中ZDR {label} 価格がありません")
+                # cache価格を公開しないZDR providerは珍しくない。成分を落とすだけにする。
+                continue
             per_component[key] = min(candidates, key=lambda item: (item[0], item[1]))
         prices[slug] = per_component
     return prices
@@ -146,13 +174,17 @@ def fallback_prices(registry: dict) -> dict[str, Any]:
                                 spec["fallback_headline"][key], scale=False)
             for key in components
         }
+        published = spec.get("fallback_zdr")
+        if not zdr_capable(spec) or not isinstance(published, dict):
+            continue
         zdr[slug] = {
             key: (
                 validate_price(f"fallback ZDR {key} for {slug}",
-                               spec["fallback_zdr"][key]["price"], scale=False),
-                validate_provider_name(spec["fallback_zdr"][key]["provider"]),
+                               published[key]["price"], scale=False),
+                validate_provider_name(published[key]["provider"]),
             )
             for key in components
+            if key in published
         }
     return {"headline": headline, "zdr": zdr, "source": "fallback"}
 
@@ -174,7 +206,8 @@ def _read_state(path: Path) -> dict:
     return document if isinstance(document, dict) else {}
 
 
-def _write_state(path: Path, result: str, now: float) -> None:
+def write_refresh_state(path: Path, result: str, now: float) -> None:
+    """取得の成否と時刻だけを残す。price refreshとmodel catalogが共有する。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(
@@ -185,11 +218,14 @@ def _write_state(path: Path, result: str, now: float) -> None:
     tmp.replace(path)
 
 
-def should_fetch(registry: dict, state_path: Path | None, now: float | None = None) -> bool:
-    """成功はTTL、失敗はbackoffの間だけ再取得を控える。"""
+def should_fetch(contract: dict, state_path: Path | None, now: float | None = None) -> bool:
+    """成功はTTL、失敗はbackoffの間だけ再取得を控える。
+
+    `contract` は `success_ttl_seconds` / `failure_backoff_seconds` を持つdict。
+    price refreshは `price_refresh`、model catalogは `catalog_refresh` を渡す。
+    """
     if state_path is None:
         return True
-    contract = registry["price_refresh"]
     state = _read_state(state_path)
     at = state.get("at")
     if not isinstance(at, (int, float)):
@@ -205,17 +241,17 @@ def should_fetch(registry: dict, state_path: Path | None, now: float | None = No
 
 def resolve(registry: dict, state_path: Path | None = None) -> dict[str, Any]:
     """取得を試み、駄目ならfallbackへ倒す。catalog生成は止めない。"""
-    if not should_fetch(registry, state_path):
+    if not should_fetch(registry["price_refresh"], state_path):
         return fallback_prices(registry)
     now = time.time()
     try:
         prices = fetch_prices(registry)
     except (PricingUnavailableError, PricingError):
         if state_path is not None:
-            _write_state(state_path, "failure", now)
+            write_refresh_state(state_path, "failure", now)
         return fallback_prices(registry)
     if state_path is not None:
-        _write_state(state_path, "success", now)
+        write_refresh_state(state_path, "success", now)
     return prices
 
 
@@ -223,16 +259,22 @@ def describe(slug: str, spec: dict, prices: dict[str, Any], registry: dict) -> s
     """v0.1.xと同じ組み立て。capability + reasoning + headline + ZDR最安。"""
     components = _components(registry)
     headline = prices["headline"][slug]
-    zdr = prices["zdr"][slug]
     headline_text = ", ".join(
         f"{label} ${decimal_label(headline[key])}/M" for key, (label, _api) in components.items()
     )
-    zdr_text = ", ".join(
-        f"{label} ${decimal_label(zdr[key][0])}/M ({zdr[key][1]})"
-        for key, (label, _api) in components.items()
-    )
+    zdr = prices["zdr"].get(slug)
+    if not zdr:
+        # 純正pickerの説明文からもZDRなしと分かるようにする。設定画面を開かないと
+        # 気づけない状態にはしない。
+        zdr_text = ZDR_ABSENT_NOTE
+    else:
+        zdr_text = "ZDR稼働endpoint最安: " + ", ".join(
+            f"{label} ${decimal_label(zdr[key][0])}/M ({zdr[key][1]})"
+            for key, (label, _api) in components.items()
+            if key in zdr
+        )
     return (
         f"{spec['capability']} {spec['reasoning_note']} {slug} via OpenRouter "
         f"({spec['canonical_slug']}). 通常headline: {headline_text}. "
-        f"ZDR稼働endpoint最安: {zdr_text}. {PRICE_NOTE}"
+        f"{zdr_text}. {PRICE_NOTE}"
     )

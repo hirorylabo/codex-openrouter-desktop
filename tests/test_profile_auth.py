@@ -133,16 +133,35 @@ class ProfileTests(unittest.TestCase):
                 resolve_profile(REGISTRY, path)
             temporary.cleanup()
 
-    def test_guardrail_model_set_must_match_exactly_and_reject_qwen_aliases(self) -> None:
+    def test_selected_models_must_be_callable_but_extra_models_are_allowed(self) -> None:
+        """Guardrailは任意なので、鍵が余分なmodelを見せていても落とさない。
+
+        落とすのは選択中のmodelが呼べないときだけ。model引退・rename・
+        制限付きkeyがこの向きで検出される。
+        """
         key_document = {"data": {"is_management_key": False, "limit": 10}}
         expected = {"minimax/minimax-m3"}
+
         for ids in (
-            ["minimax/minimax-m3", "unverified/model"],
-            ["minimax/minimax-m3", "~qwen/qwen3.8-max"],
-            [],
+            # Guardrailなしの実効集合。410件見えていても選択分が呼べればよい。
+            ["minimax/minimax-m3", "unverified/model", "qwen/qwen3.8-max"],
+            # alias・meta modelは数えないが、実体があるので通る。
+            ["minimax/minimax-m3", "~minimax/minimax-m3-latest", "openrouter/auto"],
         ):
             models_document = {"data": [{"id": model} for model in ids]}
-            with self.subTest(ids=ids), mock.patch.object(
+            with self.subTest(allowed=ids), mock.patch.object(
+                openrouter, "_get_json", side_effect=[key_document, models_document]
+            ):
+                openrouter.validate_key_and_profile("not-logged", expected)
+
+        for ids in (
+            [],
+            ["deepseek/deepseek-v4-pro"],
+            # aliasしか無いのは「呼べる」ではない。
+            ["~minimax/minimax-m3-latest"],
+        ):
+            models_document = {"data": [{"id": model} for model in ids]}
+            with self.subTest(allowed=ids), mock.patch.object(
                 openrouter, "_get_json", side_effect=[key_document, models_document]
             ), self.assertRaises(openrouter.OpenRouterError):
                 openrouter.validate_key_and_profile("not-logged", expected)
