@@ -127,9 +127,24 @@ class ShowTests(SettingsTestCase):
         State(profile_digest=self.profile.digest, active=True, guard_port=49152).save(
             self.paths.supervisor_state
         )
-        document = settings.show_document(self.paths, REGISTRY)
+        with mock.patch.object(settings, "process_pids", return_value=[1234]):
+            document = settings.show_document(self.paths, REGISTRY)
         self.assertTrue(document["openrouter_active"])
         self.assertFalse(document["editable"])
+
+    def test_stale_active_state_after_a_crash_still_allows_editing(self) -> None:
+        """SIGKILL後のactive残骸で設定画面が永久に編集不可にならないこと。
+
+        self-healは次の専用起動まで走らない。stateだけを信じると、その間ずっと
+        「ChatGPT終了後に変更できます」と出したまま何も変えられなくなる。
+        """
+        State(profile_digest=self.profile.digest, active=True, guard_port=49152).save(
+            self.paths.supervisor_state
+        )
+        with mock.patch.object(settings, "process_pids", return_value=[]):
+            document = settings.show_document(self.paths, REGISTRY)
+        self.assertFalse(document["openrouter_active"])
+        self.assertTrue(document["editable"])
 
 
 class RejectionTests(SettingsTestCase):

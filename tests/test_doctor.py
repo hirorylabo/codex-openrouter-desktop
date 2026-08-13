@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from codex_openrouter import configblock, doctor as doctor_module, guard as guard_module  # noqa: E402
+from codex_openrouter.profile import resolve_profile  # noqa: E402
 from codex_openrouter.supervisor import (  # noqa: E402
     CATALOG_BLOCK,
     PROVIDER_BLOCK,
@@ -95,6 +96,35 @@ class CatalogCheckTests(DoctorTestCase):
         self.paths.composite_catalog.write_text('{"models": []}', encoding="utf-8")
         doctor_module.check_catalog(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(self.doctor.failures)
+
+
+class ManifestCheckTests(DoctorTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = resolve_profile(ROOT / "models/registry.json", ROOT / "profiles/default.json")
+        self.paths.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_manifest(self, document: dict) -> None:
+        self.paths.install_manifest.write_text(json.dumps(document), encoding="utf-8")
+
+    def test_matching_digest_passes(self):
+        self.write_manifest({"schema_version": 5, "profile_digest": self.profile.digest})
+        doctor_module.check_manifest(self.doctor, self.paths, self.profile)
+        self.assertEqual(self.doctor.failures, [])
+
+    def test_drifted_digest_is_a_failure(self):
+        self.write_manifest({"schema_version": 5, "profile_digest": "0" * 64})
+        doctor_module.check_manifest(self.doctor, self.paths, self.profile)
+        self.assertTrue(self.doctor.failures)
+
+    def test_older_manifest_without_a_digest_is_a_warning(self):
+        self.write_manifest({"schema_version": 4})
+        doctor_module.check_manifest(self.doctor, self.paths, self.profile)
+        self.assertEqual(self.doctor.failures, [])
+
+    def test_missing_manifest_is_a_warning(self):
+        doctor_module.check_manifest(self.doctor, self.paths, self.profile)
+        self.assertEqual(self.doctor.failures, [])
 
 
 class SecretScanTests(DoctorTestCase):

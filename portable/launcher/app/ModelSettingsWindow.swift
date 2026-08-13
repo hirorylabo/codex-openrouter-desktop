@@ -112,9 +112,13 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         progress.startAnimation(nil)
     }
 
+    /// 既に読み込み済みなら読み直さない。⌘,で前面へ戻すたびに読み直すと、
+    /// 途中まで付け外したチェックが黙って巻き戻る。
     func present() {
         window.makeKeyAndOrderFront(nil)
-        reload()
+        if snapshot == nil && !saving {
+            reload()
+        }
     }
 
     // --- 読み込み ----------------------------------------------------------

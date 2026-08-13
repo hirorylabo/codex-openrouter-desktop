@@ -13,6 +13,7 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
     private let settingsButton: ActionButton
     private let launchButton: ActionButton
     private let onClose: () -> Void
+    private var snapshotReady = false
 
     init(
         onLaunch: @escaping () -> Void,
@@ -88,6 +89,7 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         noticeLabel.stringValue = snapshot.editable
             ? ""
             : "OpenRouterモードが実行中です。ChatGPT終了後に変更できます。"
+        snapshotReady = true
         settingsButton.isEnabled = true
     }
 
@@ -95,12 +97,14 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         summaryLabel.stringValue = "モデル構成を読み込めません"
         defaultLabel.stringValue = ""
         noticeLabel.stringValue = failure
+        snapshotReady = false
         settingsButton.isEnabled = false
     }
 
     func setLaunching(_ launching: Bool) {
         launchButton.isEnabled = !launching
-        settingsButton.isEnabled = !launching
+        // 読み込めていないまま設定画面を開いても空の一覧しか出せない。
+        settingsButton.isEnabled = !launching && snapshotReady
     }
 
     func windowWillClose(_ notification: Notification) {

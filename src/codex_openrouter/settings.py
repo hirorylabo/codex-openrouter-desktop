@@ -28,6 +28,7 @@ from .app import UserPaths, installed_workspace, write_json
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
+from .processes import ProcessError, process_pids
 from .profile import (
     ProfileError,
     ResolvedProfile,
@@ -76,12 +77,26 @@ def _stale_catalogs(paths: UserPaths) -> list[Path]:
     return [path for path in candidates if path.is_file() and not path.is_symlink()]
 
 
+def openrouter_is_running(paths: UserPaths) -> bool:
+    """OpenRouterモードが本当に動いているか。
+
+    stateの`active`だけでは足りない。SIGKILLや電源断の後は次の専用起動で
+    self-healするまでtrueのまま残るので、それだけを見ると設定画面が永久に
+    編集不可になる。activeなら純正appも動いているはずなので、両方を見る。
+    """
+    if not State.load(paths.supervisor_state).active:
+        return False
+    try:
+        return bool(process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"))
+    except ProcessError:
+        return True
+
+
 def show_document(paths: UserPaths, registry_path: Path) -> dict[str, Any]:
     """設定画面の描画に必要な事実だけを返す。秘密値は含まない。"""
     registry = _registry_models(registry_path)
     _selected, profile = _installed_profile(registry_path, paths)
-    state = State.load(paths.supervisor_state)
-    active = bool(state.active)
+    active = openrouter_is_running(paths)
     return {
         "schema_version": DOCUMENT_SCHEMA_VERSION,
         "profile": {**profile.as_json(), "digest": profile.digest},
