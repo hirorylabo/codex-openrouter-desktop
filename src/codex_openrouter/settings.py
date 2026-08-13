@@ -68,6 +68,7 @@ def materialize_registry(
     source_document: dict[str, Any],
     catalog_document: dict[str, Any],
     requested: list[str],
+    known: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """選択中のmodelだけを載せたregistry documentを作る。
 
@@ -75,12 +76,17 @@ def materialize_registry(
     上書きせずに残す。こうすると、同梱側で価格やeffortが直っても、既にmodelを
     足した利用者へ自然に届く。
 
+    `known` は既に手元にあるエントリ（導入済みregistry）。catalogから消えたmodelの
+    受け皿にする。これが無いと、前に足したmodelが一時的にcatalogから消えている間、
+    **無関係なmodelの追加まで巻き添えで失敗する**。
+
     並び順は「同梱registryにあるものが先、その後に追加分をcatalog順」。追加した
     瞬間に既存利用者のpicker順が入れ替わらないようにする。
     """
     rows = {row["id"]: row for row in catalog_document.get("models", [])}
     bundled = source_document["models"]
-    unknown = sorted(model for model in requested if model not in rows and model not in bundled)
+    inherited = {**bundled, **(known or {})}
+    unknown = sorted(model for model in requested if model not in rows and model not in inherited)
     if unknown:
         raise SettingsError(
             "OpenRouterの候補に無いmodelです: " + ", ".join(unknown)
@@ -88,18 +94,18 @@ def materialize_registry(
 
     selected = set(requested)
     ordered = [model for model in bundled if model in selected]
-    ordered += [row for row in rows if row in selected and row not in bundled]
+    ordered += [model for model in rows if model in selected and model not in bundled]
+    ordered += [model for model in inherited if model in selected and model not in ordered]
 
     models: dict[str, Any] = {}
     for model in ordered:
         row = rows.get(model)
-        curated = bundled.get(model)
         if row is None:
-            # catalogに出ていない（引退・一時的な欠落）が、同梱registryは知っている。
-            # 既知のエントリをそのまま使い、選択を落とさない。
-            models[model] = curated
+            # catalogに出ていない（引退・一時的な欠落）が、手元のエントリは知っている。
+            # 既知のものをそのまま使い、選択を落とさない。
+            models[model] = inherited[model]
             continue
-        models[model] = modelcatalog.entry_for(row, curated)
+        models[model] = modelcatalog.entry_for(row, bundled.get(model))
     return {
         key: value for key, value in source_document.items() if key != "models"
     } | {"models": models}
@@ -231,7 +237,9 @@ def _target_registry(
         available = modelcatalog.load(paths, source)
     except modelcatalog.CatalogError as exc:
         raise SettingsError(str(exc)) from exc
-    return materialize_registry(source, available, requested), True
+    # 手元のエントリも渡す。前に足したmodelが一時的にcatalogから消えていても、
+    # 無関係なmodelの追加を巻き添えで失敗させない。
+    return materialize_registry(source, available, requested, current["models"]), True
 
 
 def _apply_locked(

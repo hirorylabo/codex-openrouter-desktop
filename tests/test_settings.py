@@ -526,6 +526,34 @@ class ModelAdditionTests(SettingsTestCase):
         for slug in ALL_MODELS:
             self.assertTrue(installed["models"][slug]["zdr_supported"])
 
+    def test_a_previously_added_model_missing_from_the_catalog_does_not_block_others(
+        self,
+    ) -> None:
+        """catalogから消えたmodelを既に選んでいても、別のmodelを足せること。
+
+        OpenRouterの候補は日々入れ替わる。手元にエントリがあるmodelまで
+        「候補に無い」と扱うと、無関係な追加操作が巻き添えで失敗する。
+        """
+        other = "xiaomi/mimo-v2.5"
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+
+        # NEW がcatalogから消えた状態を作る。
+        without_new = {
+            **self.catalog,
+            "models": [row for row in self.catalog["models"] if row["id"] != self.NEW],
+        }
+        with mock.patch.object(modelcatalog, "load", return_value=without_new):
+            result = self.apply(self.selection([*ALL_MODELS, self.NEW, other], self.NEW))
+
+        self.assertEqual("applied", result["result"])
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        # 消えた側は手元のエントリで残り、新しい側は追加できている。
+        self.assertIn(self.NEW, installed["models"])
+        self.assertIn(other, installed["models"])
+        profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
+        self.assertIn(self.NEW, profile.models)
+        self.assertIn(other, profile.models)
+
     def test_supervisor_and_catalog_read_the_grown_registry(self) -> None:
         """追加したmodelを同梱registryしか知らない経路へ渡さないこと。
 
