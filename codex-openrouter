@@ -8,6 +8,13 @@ from pathlib import Path
 import sys
 
 
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        "codex-openrouter: Python 3.11以上が必要です。"
+        f"現在は {sys.version_info.major}.{sys.version_info.minor} です"
+    )
+
+
 def source_root() -> Path:
     adjacent = Path(__file__).resolve().parent
     if (adjacent / "src/codex_openrouter").is_dir():

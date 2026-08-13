@@ -12,7 +12,6 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     private let table = ModelCatalogTable()
     private let searchField = NSSearchField()
-    private let sortPopUp = NSPopUpButton()
     private let zdrOnly = NSButton(checkboxWithTitle: "ZDRのみ", target: nil, action: nil)
     private let noTrainingOnly = NSButton(checkboxWithTitle: "学習なしのみ", target: nil, action: nil)
     private let freeOnly = NSButton(checkboxWithTitle: "無料のみ", target: nil, action: nil)
@@ -89,19 +88,6 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         zdrOnly.toolTip = "ZDR（Zero Data Retention）で動くモデルだけを表示します。"
         noTrainingOnly.toolTip = "学習しないと確認できたモデルだけを表示します。"
 
-        sortPopUp.target = self
-        sortPopUp.action = #selector(sortChanged)
-        for (title, tag) in [
-            ("公開日が新しい順", ModelCatalogTable.Sort.released),
-            ("7dトークン利用量が多い順", .usage),
-            ("入力価格が安い順", .inputPrice),
-            ("出力価格が安い順", .outputPrice),
-            ("名前順", .name),
-        ] {
-            sortPopUp.addItem(withTitle: title)
-            sortPopUp.lastItem?.tag = tag.rawValue
-        }
-
         let filterRow = NSStackView(views: [
             searchField, zdrOnly, noTrainingOnly, freeOnly, reasoningOnly,
         ])
@@ -114,7 +100,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         let countSpacer = NSView()
         countSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let sortRow = NSStackView(views: [
-            NSTextField(labelWithString: "並び順:"), sortPopUp, countSpacer, countLabel,
+            NSTextField(labelWithString: "列名をクリックして並び替え"), countSpacer, countLabel,
         ])
         sortRow.orientation = .horizontal
         sortRow.spacing = 8
@@ -258,13 +244,6 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         refreshControls()
     }
 
-    @objc private func sortChanged(_ sender: NSPopUpButton) {
-        guard let tag = sender.selectedItem?.tag,
-              let sort = ModelCatalogTable.Sort(rawValue: tag) else { return }
-        table.sort = sort
-        refreshControls()
-    }
-
     private func toggle(_ model: String, wanted: Bool) {
         guard isEditable else { return }
         if wanted {
@@ -349,7 +328,6 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
             checkbox.isEnabled = catalogLoaded
         }
         searchField.isEnabled = catalogLoaded
-        sortPopUp.isEnabled = catalogLoaded
         defaultPopUp.isEnabled = editable && !selected.isEmpty
         countLabel.stringValue = "表示 \(table.visibleCount)件 / 選択 \(selected.count)件"
 
