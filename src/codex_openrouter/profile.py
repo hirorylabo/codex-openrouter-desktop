@@ -4,7 +4,10 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .app import UserPaths
 
 
 class ProfileError(ValueError):
@@ -153,3 +156,21 @@ def select_profile_path(
     if not path.is_file() or path.is_symlink():
         raise ProfileError(f"profileが見つからないかsymlinkです: {path}")
     return path
+
+
+def installed_profile(
+    registry_path: Path, paths: "UserPaths", *, argument: str | None = None
+) -> tuple[Path, ResolvedProfile]:
+    """picker・guard・watcher・doctor・設定画面が共有するprofile選択規則。
+
+    fallbackはregistryの隣の `profiles/default.json` に固定する。registryと
+    profileは常に同じツリーから来るので、どちらか片方だけ別のツリーを指す
+    組み合わせは存在しない。
+    """
+    selected = select_profile_path(
+        argument=argument,
+        source_default=registry_path.parent.parent / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
+    )
+    return selected, resolve_profile(registry_path, selected)

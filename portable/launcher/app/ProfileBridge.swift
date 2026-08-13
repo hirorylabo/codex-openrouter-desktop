@@ -108,7 +108,9 @@ enum ProfileBridge {
             throw Failure(message: "codex-openrouterを起動できませんでした。\n\(error.localizedDescription)")
         }
         if let input {
-            standardInput.fileHandleForWriting.write(input)
+            // 相手が先に死んでいる場合に例外で落とさない。終了コードと
+            // 標準エラーの方が利用者へ見せる情報として正しい。
+            try? standardInput.fileHandleForWriting.write(contentsOf: input)
         }
         try? standardInput.fileHandleForWriting.close()
         let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -128,13 +130,20 @@ enum ProfileBridge {
         return data
     }
 
+    /// 失敗時は受け取った本文の先頭も見せる。`profile show` / `apply` の出力に
+    /// 秘密値は含まれないので、そのまま診断に使える。
     private static func decode<T: Decodable>(_ data: Data) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
-            throw Failure(message: "codex-openrouterの応答を解釈できませんでした。")
+            let received = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw Failure(
+                message: "codex-openrouterの応答を解釈できませんでした。\n\n"
+                    + String(received.prefix(500))
+            )
         }
     }
 }

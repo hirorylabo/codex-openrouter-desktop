@@ -27,7 +27,7 @@ from . import catalog as catalog_module
 from . import configblock
 from .app import UserPaths
 from .auth import CredentialStore
-from .profile import resolve_profile, select_profile_path
+from .profile import installed_profile
 from .supervisor import CATALOG_BLOCK, PROVIDER_BLOCK, State
 
 ENDPOINT = "https://openrouter.ai/api/v1/responses"
@@ -446,13 +446,7 @@ def run(
     secret_scan: bool = False,
 ) -> int:
     registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
-    profile_path = select_profile_path(
-        argument=None,
-        source_default=registry_path.parent.parent / "profiles/default.json",
-        installed=paths.installed_profile,
-        legacy=paths.codex_home / "profile.json",
-    )
-    profile = resolve_profile(registry_path, profile_path)
+    _profile_path, profile = installed_profile(registry_path, paths)
     registry_models = profile.registry
     doctor = Doctor()
     check_stock(doctor, paths)

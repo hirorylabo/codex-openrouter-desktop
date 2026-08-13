@@ -40,13 +40,17 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         settingsButton.isEnabled = false
 
         for label in [defaultLabel, workspaceLabel, noticeLabel] {
-            label.lineBreakMode = .byTruncatingMiddle
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         summaryLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 2, weight: .semibold)
+        // pathは中略、文章は折り返す。noticeLabelにはCLIのエラーが入るので、
+        // 1行に潰すと肝心の原因が真ん中から消える。
+        workspaceLabel.lineBreakMode = .byTruncatingMiddle
         workspaceLabel.textColor = .secondaryLabelColor
+        defaultLabel.lineBreakMode = .byTruncatingTail
+        noticeLabel.lineBreakMode = .byWordWrapping
         noticeLabel.textColor = .secondaryLabelColor
-        noticeLabel.maximumNumberOfLines = 2
+        noticeLabel.maximumNumberOfLines = 3
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)

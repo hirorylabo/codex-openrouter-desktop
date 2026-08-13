@@ -20,10 +20,8 @@ from .auth import temporary_store
 from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
-from .upgrade import (
-    promote_runtime,
-    selected_profile,
-)
+from .profile import installed_profile
+from .upgrade import promote_runtime
 
 # v0.1.xの成果物。案Dでは使わないので掃除する。
 RETIRED_BINARIES = ("codex-openrouter-rebuild", "codex-openrouter-refresh")
@@ -46,7 +44,9 @@ def preflight(paths: UserPaths, source_root: Path, profile_argument: str | None)
         raise InstallError("ChatGPT.appを終了してから実行してください")
     stock = detect_stock(paths.stock_app)
 
-    _profile_path, profile = selected_profile(source_root, paths, profile_argument)
+    _profile_path, profile = installed_profile(
+        source_root / "models/registry.json", paths, argument=profile_argument
+    )
     return stock, profile
 
 

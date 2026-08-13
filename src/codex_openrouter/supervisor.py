@@ -27,7 +27,7 @@ from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
 from .processes import process_pids
-from .profile import ResolvedProfile, resolve_profile
+from .profile import ResolvedProfile, installed_profile
 
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
@@ -121,12 +121,9 @@ class Supervisor:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
         self.all_registry_models = frozenset(registry)
         if profile is None:
-            profile_path = (
-                paths.installed_profile
-                if paths.installed_profile.is_file()
-                else registry_path.parent.parent / "profiles/default.json"
-            )
-            profile = resolve_profile(registry_path, profile_path)
+            # 呼び出し側はふつう解決済みprofileを渡す。渡らなかった場合も
+            # doctor・設定画面と同じ規則で選び直す。
+            _selected, profile = installed_profile(registry_path, paths)
         self.profile = profile
         self.registry_models = profile.registry
         self.state_path = paths.supervisor_state

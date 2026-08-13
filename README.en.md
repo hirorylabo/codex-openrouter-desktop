@@ -66,7 +66,7 @@ The settings screen opens from the panel, the application menu, or `⌘,`. It li
 
 ### Switching from the stock app
 
-The stock mode and OpenRouter mode cannot run concurrently because they use the same application, userData, and `~/.codex/config.toml`. Clicking `Codex OpenRouter.app` while the stock app is running asks whether to quit it normally and restart the same signed app in OpenRouter mode.
+The stock mode and OpenRouter mode cannot run concurrently because they use the same application, userData, and `~/.codex/config.toml`. Pressing **OpenRouterで起動** while the stock app is running asks whether to quit it normally and restart the same signed app in OpenRouter mode. Merely opening the launcher panel changes nothing.
 
 - Cancel brings the existing stock app forward without changing configuration or starting the guard.
 - Switching requests normal termination only; the launcher never force-kills an unresponsive app.
@@ -103,6 +103,7 @@ When the launcher is inactive, the persistent provider definition points to non-
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src portable scripts
 PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
+xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
 python3 scripts/secret_scan.py --tree .
 python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```

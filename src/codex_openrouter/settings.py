@@ -32,10 +32,10 @@ from .processes import ProcessError, process_pids
 from .profile import (
     ProfileError,
     ResolvedProfile,
+    installed_profile,
     parse_apply_payload,
     resolve_apply_payload,
     resolve_profile,
-    select_profile_path,
 )
 from .promotion import atomic_promote
 from .supervisor import State
@@ -57,16 +57,6 @@ def _registry_models(registry_path: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(models, dict) or not models:
         raise SettingsError("model registryが空または不正です")
     return models
-
-
-def _installed_profile(registry_path: Path, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
-    selected = select_profile_path(
-        argument=None,
-        source_default=registry_path.parent.parent / "profiles/default.json",
-        installed=paths.installed_profile,
-        legacy=paths.codex_home / "profile.json",
-    )
-    return selected, resolve_profile(registry_path, selected)
 
 
 def _stale_catalogs(paths: UserPaths) -> list[Path]:
@@ -95,7 +85,7 @@ def openrouter_is_running(paths: UserPaths) -> bool:
 def show_document(paths: UserPaths, registry_path: Path) -> dict[str, Any]:
     """設定画面の描画に必要な事実だけを返す。秘密値は含まない。"""
     registry = _registry_models(registry_path)
-    _selected, profile = _installed_profile(registry_path, paths)
+    _selected, profile = installed_profile(registry_path, paths)
     active = openrouter_is_running(paths)
     return {
         "schema_version": DOCUMENT_SCHEMA_VERSION,
@@ -166,7 +156,7 @@ def _apply_locked(
     paths: UserPaths, registry_path: Path, payload: dict[str, Any]
 ) -> dict[str, Any]:
     manifest = _load_manifest(paths)
-    current_path, current = _installed_profile(registry_path, paths)
+    current_path, current = installed_profile(registry_path, paths)
     profile = resolve_apply_payload(registry_path, payload, name=current.name)
     state = State.load(paths.supervisor_state)
 

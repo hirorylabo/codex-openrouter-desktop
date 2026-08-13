@@ -120,7 +120,7 @@ registry掲載の検証済みモデルをチェックボックスで出し入れ
 
 ### 純正appからOpenRouterモードへ切り替える
 
-純正`ChatGPT.app`とOpenRouterモードは、同じapp・userData・`~/.codex/config.toml`を使うため同時起動しません。純正appの起動中に`Codex OpenRouter.app`をクリックすると、通常終了してOpenRouterモードで再起動するか確認します。
+純正`ChatGPT.app`とOpenRouterモードは、同じapp・userData・`~/.codex/config.toml`を使うため同時起動しません。純正appの起動中に管理画面の「OpenRouterで起動」を押すと、通常終了してOpenRouterモードで再起動するか確認します。
 
 - 「OpenRouterで起動」を押した時点で確認し、押すまでは何も変更しません。
 - 「キャンセル」では既存の純正appを前面へ戻し、configやguardを変更しません。
@@ -128,9 +128,9 @@ registry掲載の検証済みモデルをチェックボックスで出し入れ
 - CLIの`codex-openrouter launch`は確認UIを持たないため、純正appを終了してから実行してください。
 - setup、upgrade、rollback、migrate、launchはユーザー単位で排他され、並行実行した2本目は共有状態を変更する前に停止します。
 
-### クリック起動時の自動更新
+### 起動時の自動更新
 
-リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は`Codex OpenRouter.app`をクリックするたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。
+リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は「OpenRouterで起動」を押すたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。管理画面を開いただけでは更新しません。
 
 自動経路では実課金のAPI往復（`validate_key_and_profile`）を行いません。失敗しても起動は止まらず、`atomic_promote`のverifyが落ちれば直前の状態へ自動rollbackします。同じ内容で一度失敗したら、内容が変わるまで再試行しません。
 
@@ -151,7 +151,7 @@ registry掲載の検証済みモデルをチェックボックスで出し入れ
 
 API keyから見えるconcrete model集合がprofileと完全一致しない場合、導入を停止します。
 
-正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。並び順の出所はregistryだけで、profile側の記述順やUIの操作順は結果に影響しません。通常upgradeとクリック時の自動upgradeはこのprofileを維持します。置き換えるのは明示的な`upgrade --profile default|FILE`とモデル設定画面の保存だけで、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
+正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。並び順の出所はregistryだけで、profile側の記述順やUIの操作順は結果に影響しません。通常upgradeと起動時の自動upgradeはこのprofileを維持します。置き換えるのは明示的な`upgrade --profile default|FILE`とモデル設定画面の保存だけで、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
 
 モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、この2つを呼ぶだけです。
 
@@ -209,6 +209,7 @@ codex-openrouter auth logout
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src portable scripts
 PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
+xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
 python3 scripts/secret_scan.py --tree .
 python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```

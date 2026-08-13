@@ -21,7 +21,7 @@ from . import configblock
 from .lifecycle import LifecycleLock
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
-from .profile import ProfileError, ResolvedProfile, resolve_profile, select_profile_path
+from .profile import ProfileError, ResolvedProfile, installed_profile
 
 
 class CliError(RuntimeError):
@@ -35,18 +35,8 @@ def root() -> Path:
     return Path(value).resolve()
 
 
-def profile_path(argument: str | None, paths: UserPaths) -> Path:
-    return select_profile_path(
-        argument=argument,
-        source_default=root() / "profiles/default.json",
-        installed=paths.installed_profile,
-        legacy=paths.codex_home / "profile.json",
-    )
-
-
 def resolved_profile(argument: str | None, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
-    selected = profile_path(argument, paths)
-    return selected, resolve_profile(root() / "models/registry.json", selected)
+    return installed_profile(root() / "models/registry.json", paths, argument=argument)
 
 
 def credential_store(paths: UserPaths) -> tuple[CredentialStore, object | None]:
@@ -216,13 +206,7 @@ def _rollback_locked(paths: UserPaths) -> int:
         from .supervisor import Supervisor
 
         registry_path = paths.support_root / "models/registry.json"
-        selected = select_profile_path(
-            argument=None,
-            source_default=paths.support_root / "profiles/default.json",
-            installed=paths.installed_profile,
-            legacy=paths.codex_home / "profile.json",
-        )
-        profile = resolve_profile(registry_path, selected)
+        _selected, profile = installed_profile(registry_path, paths)
         if paths.shared_config.is_file():
             Supervisor(paths, registry_path, profile=profile).self_heal()
         if subprocess.run([str(paths.bin_dir / "codex-openrouter-doctor")]).returncode != 0:
@@ -465,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_parser.add_argument(
         "--if-needed",
         action="store_true",
-        help="導入元に差分があるときだけ更新する（ランチャーがクリック時に使う）",
+        help="導入元に差分があるときだけ更新する（ランチャーが起動時に使う）",
     )
     upgrade_parser.set_defaults(func=upgrade_command)
 

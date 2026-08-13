@@ -209,6 +209,15 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         refreshControls()
     }
 
+    /// 保存できる既定モデル。選択集合の中に無ければ「未選択」として扱う。
+    ///
+    /// 保存可否・popupの選択・保存payloadがこの1箇所を見る。別々に判定すると、
+    /// 保存ボタンだけが理由も出さずに無効、のような食い違いが生まれる。
+    private var resolvedDefault: String? {
+        guard let defaultModel, selected.contains(defaultModel) else { return nil }
+        return defaultModel
+    }
+
     private func refreshControls() {
         guard let snapshot else { return }
         let editable = snapshot.editable && !saving
@@ -217,20 +226,21 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         }
         defaultPopUp.isEnabled = editable && !selected.isEmpty
 
+        let usable = resolvedDefault
         defaultPopUp.removeAllItems()
-        if defaultModel == nil {
+        if usable == nil {
             defaultPopUp.addItem(withTitle: Self.placeholderTitle)
             defaultPopUp.item(at: 0)?.isEnabled = false
         }
         for option in snapshot.available where selected.contains(option.id) {
             defaultPopUp.addItem(withTitle: option.displayName)
             defaultPopUp.lastItem?.representedObject = option.id
-            if option.id == defaultModel {
+            if option.id == usable {
                 defaultPopUp.select(defaultPopUp.lastItem)
             }
         }
 
-        let ready = !selected.isEmpty && defaultModel.map(selected.contains) == true
+        let ready = !selected.isEmpty && usable != nil
         saveButton.isEnabled = editable && ready
         statusLabel.stringValue = guidance(editable: snapshot.editable)
     }
@@ -245,7 +255,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         if selected.isEmpty {
             return "最低1モデルを選択してください。"
         }
-        if defaultModel == nil {
+        if resolvedDefault == nil {
             return "既定モデルを選び直してください。"
         }
         return ""
@@ -258,7 +268,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     }
 
     private func save() {
-        guard let snapshot, let defaultModel, !saving else { return }
+        guard let snapshot, let defaultModel = resolvedDefault, !saving else { return }
         let models = snapshot.available.map(\.id).filter(selected.contains)
         saving = true
         refreshControls()
@@ -280,7 +290,6 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
             saving = false
             progress.stopAnimation(nil)
             refreshControls()
-            statusLabel.stringValue = ""
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "保存できませんでした"

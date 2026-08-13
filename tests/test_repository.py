@@ -298,9 +298,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("次回のOpenRouter起動から反映されます。", swift)
         self.assertIn('ActionButton(title: "OpenRouter Guardrailを開く"', swift)
         self.assertIn('ActionButton(title: "検証して保存"', swift)
-        self.assertIn(
-            "let ready = !selected.isEmpty && defaultModel.map(selected.contains) == true", swift
-        )
+        # 保存可否・popup選択・保存payloadが同じ判定を見ること。別々に持つと
+        # 「理由が出ないまま保存ボタンだけ無効」になる。
+        self.assertIn("private var resolvedDefault: String? {", swift)
+        self.assertIn("let ready = !selected.isEmpty && usable != nil", swift)
+        self.assertIn("if resolvedDefault == nil {", swift)
+        self.assertIn("guard let snapshot, let defaultModel = resolvedDefault", swift)
         # 既定を外したら黙って他へ寄せない。
         self.assertIn("defaultModel = nil", swift)
 

@@ -35,7 +35,7 @@ from . import configblock
 from .lifecycle import LifecycleLock, LifecycleLockError
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
-from .profile import ResolvedProfile, resolve_profile, select_profile_path
+from .profile import ResolvedProfile, installed_profile
 from .promotion import atomic_promote
 from .supervisor import State, Supervisor, provider_block_body
 
@@ -130,7 +130,7 @@ def manifest_document(
 ) -> dict:
     """install-manifest.json の中身。installとupgradeで同じ物を書く。
 
-    `source_root` はクリック時の自動更新が「どこと比べるか」を決める唯一の手がかり。
+    `source_root` は起動時の自動更新が「どこと比べるか」を決める唯一の手がかり。
     ただしインストール済みツリー自身は記録しない。PATH上の codex-openrouter は
     source root をインストール先へ解決するので（codex-openrouter の source_root()）、
     そこから upgrade を打つと source が自分自身になり、記録すると以後の自動更新が
@@ -216,20 +216,6 @@ def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: P
     )
     run(["/usr/bin/codesign", "--force", "--sign", "-", str(target)])
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(target)])
-
-
-def selected_profile(
-    source_root: Path,
-    paths: UserPaths,
-    argument: str | None,
-) -> tuple[Path, ResolvedProfile]:
-    path = select_profile_path(
-        argument=argument,
-        source_default=source_root / "profiles/default.json",
-        installed=paths.installed_profile,
-        legacy=paths.codex_home / "profile.json",
-    )
-    return path, resolve_profile(source_root / "models/registry.json", path)
 
 
 def promote_runtime(
@@ -386,7 +372,9 @@ def _upgrade_unlocked(
     if process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"):
         raise UpgradeError("ChatGPT.appを終了してからupgradeしてください")
     stock = detect_stock(paths.stock_app)
-    _profile_path, profile = selected_profile(source_root, paths, profile_argument)
+    _profile_path, profile = installed_profile(
+        source_root / "models/registry.json", paths, argument=profile_argument
+    )
     # runtimeファイルの入れ替えに実課金のAPI往復は要らない。自動経路では外す。
     if network_check:
         key = CredentialStore(paths.credential_helper).get()
@@ -417,13 +405,13 @@ def _selfupdate_state(path: Path) -> dict:
 
 
 def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
-    """クリック起動の前段。差分があるときだけupgradeする。
+    """「OpenRouterで起動」の前段。差分があるときだけupgradeする。
 
     **失敗しても0を返す。** 起動そのものは止めない。promotionのverifyが落ちれば
     自動rollbackが効くので、runtimeは直前の動く状態に戻る。
 
     同じ内容で一度失敗したらskipする。壊れた作業中のツリーを掴んだとき、
-    クリックのたびに十数秒払って同じ失敗を繰り返さないため。
+    起動のたびに十数秒払って同じ失敗を繰り返さないため。
     """
     receipt = paths.install_manifest
     if not receipt.is_file() or receipt.is_symlink():
