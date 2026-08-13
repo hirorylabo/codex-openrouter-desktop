@@ -1,3 +1,16 @@
+"""runtimeファイルの原子的な更新。
+
+案Dでは純正appを一切変更しないので、ASARパッチ・adapter・vendored patcherの
+取得・cloneバンドルの差し替えは全て無くなった。ここで扱うのは
+「このツール自身のruntimeファイル」だけ。
+
+- support root（src / models / profiles / portable）
+- ~/.local/bin の実行ファイルとKeychain helper
+- Desktop の Codex OpenRouter.app（ランチャー専用バンドル）
+
+置換は promotion.atomic_promote に任せる。verifyが落ちれば全部戻る。
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -8,38 +21,28 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import urllib.request
 
 from . import __version__
-from .app import UserPaths, detect_stock, load_adapter, sha256
+from .app import UserPaths, assert_apple_silicon, detect_stock
 from .auth import CredentialStore
+from . import configblock
+from .lifecycle import LifecycleLock, LifecycleLockError
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
-from .profile import resolve_profile
+from .profile import ResolvedProfile, resolve_profile, select_profile_path
 from .promotion import atomic_promote
+from .supervisor import State, Supervisor, provider_block_body
 
 
 class UpgradeError(RuntimeError):
     pass
 
 
-CONTROLLED_HOME_FILES = (
-    "adapter.json",
-    "config.toml",
-    "profile.json",
-    "registry.json",
-    "desktop-model-providers.json",
-    "model-catalogs/openrouter.json",
-    "price-refresh-state.json",
-    "install-manifest.json",
-)
 BINARIES = (
     "codex-openrouter",
     "codex-openrouter-credential",
-    "codex-openrouter-refresh",
     "codex-openrouter-doctor",
     "codex-openrouter-app",
-    "codex-openrouter-rebuild",
 )
 
 
@@ -58,21 +61,89 @@ def run(command: list[str], *, environment: dict[str, str] | None = None) -> str
     return result.stdout
 
 
+# support rootへ運ぶもの。copy_support と runtime_digest が同じ一覧を見ることが
+# 要点で、片方だけ増えると「変わったのに変わっていない」と判定される。
+SUPPORT_TREES = ("src", "models", "profiles", "portable")
+SUPPORT_FILES = ("codex-openrouter", "VERSION")
+IGNORED_PARTS = frozenset({"node_modules", "__pycache__", ".generated", ".test-output", "dist"})
+
+
 def copy_support(source_root: Path, target: Path) -> None:
     target.mkdir()
-    ignored = shutil.ignore_patterns(
-        "node_modules", "__pycache__", ".generated", ".test-output", "dist"
-    )
-    for name in ("src", "models", "profiles", "adapters", "portable"):
+    ignored = shutil.ignore_patterns(*sorted(IGNORED_PARTS))
+    for name in SUPPORT_TREES:
         shutil.copytree(
             source_root / name,
             target / name,
             copy_function=shutil.copy2,
             ignore=ignored,
         )
-    for name in ("codex-openrouter", "VERSION"):
+    for name in SUPPORT_FILES:
         shutil.copy2(source_root / name, target / name)
     (target / "codex-openrouter").chmod(0o755)
+
+
+def runtime_digest(root: Path) -> str:
+    """support rootへ運ばれる内容のsha256。
+
+    相対pathも混ぜる。ファイルの追加・削除・改名も差として出したいため。
+    installed側は実行のたびに `__pycache__` が増えるので、copy_support と同じ
+    ignore集合で落とす。
+    """
+    digest = hashlib.sha256()
+    entries: list[tuple[str, Path]] = []
+    for name in SUPPORT_FILES:
+        path = root / name
+        if path.is_file():
+            entries.append((name, path))
+    for name in SUPPORT_TREES:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            relative = path.relative_to(root)
+            if IGNORED_PARTS.intersection(relative.parts):
+                continue
+            if path.is_file() and not path.is_symlink():
+                entries.append((str(relative), path))
+    for relative, path in sorted(entries):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def manifest_document(
+    source_root: Path,
+    paths: UserPaths,
+    stock,
+    workspace: Path,
+    source_commit: str,
+    profile_digest: str,
+) -> dict:
+    """install-manifest.json の中身。installとupgradeで同じ物を書く。
+
+    `source_root` はクリック時の自動更新が「どこと比べるか」を決める唯一の手がかり。
+    ただしインストール済みツリー自身は記録しない。PATH上の codex-openrouter は
+    source root をインストール先へ解決するので（codex-openrouter の source_root()）、
+    そこから upgrade を打つと source が自分自身になり、記録すると以後の自動更新が
+    永久に「変化なし」と判定される。
+    """
+    document = {
+        "schema_version": 5,
+        "release_version": __version__,
+        "source_commit": source_commit,
+        "chatgpt_version": stock.version,
+        "chatgpt_build": stock.build,
+        "workspace": str(workspace),
+        "mode": "loopback-guard",
+        "profile_digest": profile_digest,
+    }
+    if source_root != paths.support_root:
+        document["source_root"] = str(source_root)
+        document["source_digest"] = runtime_digest(source_root)
+    return document
 
 
 def render_template(source: Path, target: Path, home: Path, python: str) -> None:
@@ -85,67 +156,98 @@ def render_template(source: Path, target: Path, home: Path, python: str) -> None
     target.chmod(0o755)
 
 
-def fetch_verified(url: str, expected: str, target: Path) -> None:
-    request = urllib.request.Request(
-        url, headers={"User-Agent": f"codex-openrouter-desktop/{__version__}"}
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = response.read()
-    actual = hashlib.sha256(payload).hexdigest()
-    if actual != expected:
-        raise UpgradeError(f"pinned download hash mismatch: {actual}")
-    target.write_bytes(payload)
-    target.chmod(0o644)
-
-
 def _write_json(path: Path, document: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     path.chmod(0o600)
 
 
-def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
-    if not paths.openrouter_app.is_dir() or not paths.codex_home.is_dir():
-        raise UpgradeError("既存installationがありません。先にsetupを実行してください")
-    active_executable = paths.openrouter_app / "Contents/MacOS/ChatGPT"
-    if process_pids(active_executable):
-        raise UpgradeError("専用appを通常終了してからupgradeしてください")
-    stock = detect_stock(paths.stock_app)
-    adapter = load_adapter(source_root / "adapters/index.json", stock)
-    if adapter is None:
-        raise UpgradeError("未知buildはupgradeできません。codex-openrouter updateでcandidateを作成してください")
-    profile_path = (
-        paths.codex_home / "profile.json"
-        if profile_argument == "default"
-        else Path(profile_argument).expanduser().resolve()
-    )
-    profile = resolve_profile(source_root / "models/registry.json", profile_path)
-    key = CredentialStore(paths.credential_helper).get()
-    print("INFO: upgrade検証は少量のOpenRouter API利用料が発生する場合があります。")
-    metadata = validate_key_and_profile(key, set(profile.models))
-    if metadata.get("limit") is None:
-        print("WARNING: API keyのspend limitが未設定です。")
+def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: Path) -> None:
+    """Desktopに置くランチャー専用バンドルを組み立てる。
 
-    manifest = json.loads((source_root / "portable/manifest.json").read_text(encoding="utf-8"))
-    upstream = manifest["upstream_patcher"]
+    純正appのcloneではない。事前処理をしてから /Applications/ChatGPT.app を
+    起動するだけの薄いバンドル。
+
+    workspaceとlog pathはInfo.plistへ焼き込む。Swift側に同じpathを書くと、
+    Pythonが出所であるはずのpathが二重定義になり、v0.2.0のように片方だけ
+    取り残される。
+    """
+    executable = target / "Contents/MacOS/CodexOpenRouterLauncher"
+    executable.parent.mkdir(parents=True)
+    resources = target / "Contents/Resources"
+    resources.mkdir()
+    plist = target / "Contents/Info.plist"
+    shutil.copy2(source_root / "portable/launcher/Info.plist", plist)
+    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+        run(["/usr/bin/plutil", "-replace", key, "-string", __version__, str(plist)])
+    run(
+        [
+            str(source_root / "portable/launcher/build_icon.zsh"),
+            str(source_root / "portable/launcher/CreateLauncherIcon.swift"),
+            str(resources / "AppIcon.icns"),
+        ]
+    )
+    for key, value in (
+        ("CodexDefaultWorkspace", str(workspace)),
+        ("CodexLauncherLog", str(log_path)),
+    ):
+        run(["/usr/bin/plutil", "-replace", key, "-string", value, str(plist)])
+    run(
+        [
+            "/usr/bin/xcrun",
+            "swiftc",
+            str(source_root / "portable/launcher/CodexOpenRouterLauncher.swift"),
+            "-o",
+            str(executable),
+        ]
+    )
+    run(["/usr/bin/codesign", "--force", "--sign", "-", str(target)])
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(target)])
+
+
+def selected_profile(
+    source_root: Path,
+    paths: UserPaths,
+    argument: str | None,
+) -> tuple[Path, ResolvedProfile]:
+    path = select_profile_path(
+        argument=argument,
+        source_default=source_root / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
+    )
+    return path, resolve_profile(source_root / "models/registry.json", path)
+
+
+def promote_runtime(
+    source_root: Path,
+    paths: UserPaths,
+    stock,
+    workspace: Path,
+    profile: ResolvedProfile,
+) -> Path:
+    """setup/upgrade共通のstaging・検証・atomic promotion。"""
+    if paths.shared_config.is_file():
+        # marker外衝突や壊れたTOMLは、何も置換する前に停止する。
+        configblock.render_managed(
+            paths.shared_config.read_text(encoding="utf-8"),
+            provider_body=provider_block_body(0),
+        )
+
     python = shutil.which("python3") or "/usr/bin/python3"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_root = paths.codex_home / "upgrade-backups" / f"{timestamp}-v{__version__}"
-    receipt = paths.codex_home / "install-manifest.json"
-    workspace = paths.home / "Documents"
-    if receipt.is_file() and not receipt.is_symlink():
-        saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
-        if isinstance(saved, str) and Path(saved).is_dir():
-            workspace = Path(saved)
+    backup_root = paths.state_dir / "upgrade-backups" / f"{timestamp}-v{__version__}"
+    for directory in (paths.bin_dir, paths.state_dir, paths.support_root.parent):
+        directory.mkdir(parents=True, exist_ok=True)
+    paths.state_dir.chmod(0o700)
 
-    with tempfile.TemporaryDirectory(prefix="codex-openrouter-upgrade-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="codex-openrouter-deploy-") as temporary:
         stage = Path(temporary).resolve()
         stage_support = stage / "support"
-        stage_home = stage / "home"
         stage_bin = stage / "bin"
-        stage_patch = stage / "patch"
+        stage_state = stage / "state"
         stage_launcher = stage / "Codex OpenRouter.app"
-        for directory in (stage_home, stage_bin, stage_patch):
+        for directory in (stage_bin, stage_state):
             directory.mkdir()
         copy_support(source_root, stage_support)
 
@@ -159,27 +261,9 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
                 str(credential),
             ]
         )
+        # 一時helperで保存済みのKeychain itemを、staged helperで確認する。
         run([str(credential), "status"])
-        run(
-            [
-                python,
-                str(source_root / "portable/render_runtime.py"),
-                "--registry",
-                str(source_root / "models/registry.json"),
-                "--profile",
-                str(profile_path),
-                "--template",
-                str(source_root / "portable/templates/config.toml.in"),
-                "--output-home",
-                str(stage_home),
-                "--runtime-home",
-                str(paths.codex_home),
-                "--credential-helper",
-                str(paths.credential_helper),
-            ],
-            environment={**os.environ, "PYTHONPATH": str(source_root / "src")},
-        )
-        _write_json(stage_home / "adapter.json", adapter)
+
         commit_result = subprocess.run(
             ["/usr/bin/git", "-C", str(source_root), "rev-parse", "HEAD"],
             text=True,
@@ -191,27 +275,32 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
             if commit_result.returncode == 0 and commit_result.stdout.strip()
             else "release-archive"
         )
+        _write_json(stage_state / "profile.json", profile.as_json())
+        state = State.load(paths.supervisor_state)
+        if state.profile_digest != profile.digest:
+            state.pending_default_model = True
+        state.profile_digest = profile.digest
+        state.active = False
+        state.guard_port = None
+        state.guard_nonce = None
+        state.save(stage_state / "supervisor.json")
         _write_json(
-            stage_home / "install-manifest.json",
-            {
-                "schema_version": 2,
-                "release_version": __version__,
-                "source_commit": source_commit,
-                "adapter_id": adapter["id"],
-                "chatgpt_version": stock.version,
-                "chatgpt_build": stock.build,
-                "stock_asar_sha256": stock.asar_sha256,
-                "workspace": str(workspace),
-            },
+            stage_state / "install-manifest.json",
+            manifest_document(
+                source_root,
+                paths,
+                stock,
+                workspace,
+                source_commit,
+                profile.digest,
+            ),
         )
 
         shutil.copy2(source_root / "codex-openrouter", stage_bin / "codex-openrouter")
         (stage_bin / "codex-openrouter").chmod(0o755)
         for template, target in (
-            ("codex-openrouter-refresh.py.in", "codex-openrouter-refresh"),
             ("codex-openrouter-doctor.py.in", "codex-openrouter-doctor"),
             ("codex-openrouter-app.zsh.in", "codex-openrouter-app"),
-            ("codex-openrouter-rebuild.zsh.in", "codex-openrouter-rebuild"),
         ):
             render_template(
                 source_root / "portable/templates" / template,
@@ -219,153 +308,155 @@ def upgrade(source_root: Path, paths: UserPaths, profile_argument: str) -> int:
                 paths.home,
                 python,
             )
-        run(
-            [
-                python,
-                "-m",
-                "py_compile",
-                str(stage_bin / "codex-openrouter-refresh"),
-                str(stage_bin / "codex-openrouter-doctor"),
-            ]
-        )
+        run([python, "-m", "py_compile", str(stage_bin / "codex-openrouter-doctor")])
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
-        run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-rebuild")])
-
-        fetch_verified(
-            upstream["source_url"],
-            upstream["source_sha256"],
-            stage_patch / "patch_chatgpt_providers.py",
-        )
-        fetch_verified(
-            upstream["license_url"],
-            upstream["license_sha256"],
-            stage_patch / "LICENSE",
-        )
-
-        active_adapter = json.loads((paths.codex_home / "adapter.json").read_text(encoding="utf-8"))
-        candidate_app: Path | None = None
-        if active_adapter != adapter:
-            candidate_app = stage / "ChatGPT OpenRouter Candidate.app"
-            run(["/usr/bin/ditto", str(paths.stock_app), str(candidate_app)])
-            patcher = (source_root / adapter["patcher"]).resolve()
-            if not patcher.is_relative_to(source_root) or not patcher.is_file():
-                raise UpgradeError("adapter patcher pathが不正です")
-            run(
-                [
-                    python,
-                    str(patcher),
-                    "--app",
-                    str(candidate_app),
-                    "--config",
-                    str(stage_home / "desktop-model-providers.json"),
-                    "--backup-dir",
-                    str(stage / "patch-backup"),
-                    "--upstream",
-                    str(stage_patch / "patch_chatgpt_providers.py"),
-                    "--upstream-sha256",
-                    upstream["source_sha256"],
-                ]
-            )
-            if (
-                sha256(candidate_app / "Contents/Resources/app.asar")
-                != adapter["patched_asar_sha256"]
-            ):
-                raise UpgradeError("known adapter candidateのpatched hashが一致しません")
-            run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(candidate_app)])
-        elif (
-            sha256(paths.openrouter_app / "Contents/Resources/app.asar")
-            != adapter["patched_asar_sha256"]
-        ):
-            raise UpgradeError("active appがknown adapterのpatched hashと一致しません")
-
-        environment = {
-            **os.environ,
-            "CODEX_OPENROUTER_HOME": str(stage_home),
-            "CODEX_OPENROUTER_RUNTIME_HOME": str(paths.codex_home),
-            "CODEX_OPENROUTER_APP": str(candidate_app or paths.openrouter_app),
-            "CODEX_OPENROUTER_CREDENTIAL": str(credential),
-            "CODEX_OPENROUTER_SUPPORT_ROOT": str(stage_support),
-            "PYTHONPATH": str(stage_support / "src"),
-        }
-        run([str(stage_bin / "codex-openrouter-refresh"), "--init"], environment=environment)
-        run(
-            [
-                str(stage_bin / "codex-openrouter-doctor"),
-                "--network",
-                "--secret-scan",
-            ],
-            environment=environment,
-        )
+        build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")
 
         replacements: list[tuple[Path, Path]] = [(stage_support, paths.support_root)]
         replacements.extend((stage_bin / name, paths.bin_dir / name) for name in BINARIES)
-        replacements.append((stage_launcher, paths.desktop_launcher))
-        launcher_executable = stage_launcher / "Contents/MacOS/CodexOpenRouterLauncher"
-        launcher_executable.parent.mkdir(parents=True)
-        launcher_resources = stage_launcher / "Contents/Resources"
-        launcher_resources.mkdir()
-        launcher_plist = stage_launcher / "Contents/Info.plist"
-        shutil.copy2(source_root / "portable/launcher/Info.plist", launcher_plist)
-        for key in ("CFBundleShortVersionString", "CFBundleVersion"):
-            run(
-                [
-                    "/usr/bin/plutil",
-                    "-replace",
-                    key,
-                    "-string",
-                    __version__,
-                    str(launcher_plist),
-                ]
-            )
-        run(
-            [
-                str(source_root / "portable/launcher/build_icon.zsh"),
-                str(source_root / "portable/launcher/CreateLauncherIcon.swift"),
-                str(launcher_resources / "AppIcon.icns"),
-            ]
-        )
-        run(
-            [
-                "/usr/bin/plutil",
-                "-replace",
-                "CodexDefaultWorkspace",
-                "-string",
-                str(workspace),
-                str(launcher_plist),
-            ]
-        )
-        run(
-            [
-                "/usr/bin/xcrun",
-                "swiftc",
-                str(source_root / "portable/launcher/CodexOpenRouterLauncher.swift"),
-                "-o",
-                str(launcher_executable),
-            ]
-        )
-        run(["/usr/bin/codesign", "--force", "--sign", "-", str(stage_launcher)])
-        run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(stage_launcher)])
-        replacements.append(
-            (
-                stage_patch,
-                paths.home
-                / ".local/share/codex-openrouter-patcher"
-                / upstream["commit"],
-            )
-        )
         replacements.extend(
-            (stage_home / name, paths.codex_home / name)
-            for name in CONTROLLED_HOME_FILES
+            (
+                (stage_launcher, paths.desktop_launcher),
+                (stage_state / "install-manifest.json", paths.state_dir / "install-manifest.json"),
+                (stage_state / "profile.json", paths.installed_profile),
+                (stage_state / "supervisor.json", paths.supervisor_state),
+            )
         )
-        if candidate_app is not None:
-            replacements.append((candidate_app, paths.openrouter_app))
 
         def verify_live() -> None:
-            run([str(paths.bin_dir / "codex-openrouter-doctor"), "--secret-scan"])
+            run([str(paths.credential_helper), "status"])
+            if paths.shared_config.is_file():
+                Supervisor(
+                    paths,
+                    paths.support_root / "models/registry.json",
+                    profile=profile,
+                ).self_heal()
+            environment = {**os.environ, "PYTHONPATH": str(paths.support_root / "src")}
+            run(
+                [str(paths.bin_dir / "codex-openrouter-doctor"), "--secret-scan"],
+                environment=environment,
+            )
             if detect_stock(paths.stock_app) != stock:
-                raise UpgradeError("upgrade中にstock appが変化しました")
+                raise UpgradeError("導入中にstock appが変化しました")
 
         atomic_promote(replacements, backup_root, verify_live)
-    print(f"UPGRADE: PASS v{__version__} adapter={adapter['id']}")
+    return backup_root
+
+
+def upgrade(
+    source_root: Path,
+    paths: UserPaths,
+    profile_argument: str | None = None,
+    *,
+    network_check: bool = True,
+) -> int:
+    """runtime更新を共有lifecycle lock内で実行する。"""
+    with LifecycleLock(paths):
+        return _upgrade_unlocked(
+            source_root,
+            paths,
+            profile_argument,
+            network_check=network_check,
+        )
+
+
+def _upgrade_unlocked(
+    source_root: Path,
+    paths: UserPaths,
+    profile_argument: str | None = None,
+    *,
+    network_check: bool = True,
+) -> int:
+    assert_apple_silicon()
+    if not paths.bin_dir.is_dir():
+        raise UpgradeError("既存installationがありません。先にsetupを実行してください")
+    if process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"):
+        raise UpgradeError("ChatGPT.appを終了してからupgradeしてください")
+    stock = detect_stock(paths.stock_app)
+    _profile_path, profile = selected_profile(source_root, paths, profile_argument)
+    # runtimeファイルの入れ替えに実課金のAPI往復は要らない。自動経路では外す。
+    if network_check:
+        key = CredentialStore(paths.credential_helper).get()
+        print("INFO: upgrade検証は少量のOpenRouter API利用料が発生する場合があります。")
+        metadata = validate_key_and_profile(key, set(profile.models))
+        if metadata.get("limit") is None:
+            print("WARNING: API keyのspend limitが未設定です。")
+
+    workspace = paths.home / "Documents"
+    receipt = paths.state_dir / "install-manifest.json"
+    if receipt.is_file() and not receipt.is_symlink():
+        saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
+        if isinstance(saved, str) and Path(saved).is_dir():
+            workspace = Path(saved)
+
+    backup_root = promote_runtime(source_root, paths, stock, workspace, profile)
+    print(f"UPGRADE: PASS v{__version__} mode=loopback-guard")
     print(f"rollback backup: {backup_root}")
+    return 0
+
+
+# ランチャーがHUDの出し入れに使う。Swift側と同じ文字列であること。
+STATUS_UPDATING = "STATUS: updating"
+STATUS_LAUNCHING = "STATUS: launching"
+
+
+def _selfupdate_state(path: Path) -> dict:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
+    """クリック起動の前段。差分があるときだけupgradeする。
+
+    **失敗しても0を返す。** 起動そのものは止めない。promotionのverifyが落ちれば
+    自動rollbackが効くので、runtimeは直前の動く状態に戻る。
+
+    同じ内容で一度失敗したらskipする。壊れた作業中のツリーを掴んだとき、
+    クリックのたびに十数秒払って同じ失敗を繰り返さないため。
+    """
+    receipt = paths.state_dir / "install-manifest.json"
+    if not receipt.is_file() or receipt.is_symlink():
+        return 0
+    recorded = _selfupdate_state(receipt).get("source_root")
+    if not isinstance(recorded, str) or not recorded:
+        return 0
+    source_root = Path(recorded)
+    # 記録されたpathをそのまま実行するので、利用者のhome配下に限る。
+    if not source_root.is_dir() or not source_root.is_relative_to(paths.home):
+        return 0
+    if source_root == paths.support_root:
+        return 0
+
+    try:
+        source_digest = runtime_digest(source_root)
+        installed_digest = runtime_digest(paths.support_root)
+    except OSError:
+        return 0
+    if source_digest == installed_digest:
+        return 0
+
+    state_path = paths.state_dir / "selfupdate.json"
+    state = _selfupdate_state(state_path)
+    if state.get("result") == "failure" and state.get("digest") == source_digest:
+        print(f"自動更新: 同じ内容で失敗済みのためskipします（{source_root}）")
+        return 0
+
+    print(STATUS_UPDATING, flush=True)
+    print(f"自動更新: {source_root} の変更を反映します", flush=True)
+    try:
+        upgrade(source_root, paths, profile_argument, network_check=False)
+        result = "success"
+    except LifecycleLockError:
+        # 起動中・別更新中は一時的な競合であり、同じdigestの恒久失敗にしない。
+        print("自動更新: Codex OpenRouterが使用中のためskipします")
+        print(STATUS_LAUNCHING, flush=True)
+        return 0
+    except Exception as error:  # 起動は止めない
+        result = "failure"
+        print(f"自動更新に失敗しました（起動は続行します）: {error}")
+    _write_json(state_path, {"schema_version": 1, "result": result, "digest": source_digest})
+    print(STATUS_LAUNCHING, flush=True)
     return 0

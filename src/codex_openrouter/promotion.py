@@ -33,7 +33,7 @@ def _write_report(path: Path, document: dict) -> None:
 
 
 def atomic_promote(
-    replacements: Iterable[tuple[Path, Path]],
+    replacements: Iterable[tuple[Path | None, Path]],
     backup_root: Path,
     verify: Callable[[], None],
 ) -> None:
@@ -47,21 +47,28 @@ def atomic_promote(
     failed = backup_root / "failed-new"
     originals.mkdir(mode=0o700)
     failed.mkdir(mode=0o700)
-    prepared: list[tuple[Path, Path, Path | None]] = []
+    prepared: list[tuple[Path | None, Path, Path | None]] = []
     report: dict = {"schema_version": 1, "result": "preparing", "targets": []}
     try:
         for index, (source, target) in enumerate(items):
             target.parent.mkdir(parents=True, exist_ok=True)
-            incoming = target.parent / f".{target.name}.upgrade-new"
-            if incoming.exists() or incoming.is_symlink():
-                raise PromotionError(f"stale staging targetがあります: {incoming}")
             if target.is_symlink():
                 raise PromotionError(f"symlink targetは置換しません: {target}")
-            _copy(source, incoming)
+            incoming = target.parent / f".{target.name}.upgrade-new" if source is not None else None
+            if incoming is not None:
+                if incoming.exists() or incoming.is_symlink():
+                    raise PromotionError(f"stale staging targetがあります: {incoming}")
+                _copy(source, incoming)
+            elif not target.exists():
+                raise PromotionError(f"削除対象が存在しません: {target}")
             original = originals / str(index) if target.exists() else None
             prepared.append((incoming, target, original))
             report["targets"].append(
-                {"target": str(target), "had_original": original is not None}
+                {
+                    "target": str(target),
+                    "had_original": original is not None,
+                    "remove": source is None,
+                }
             )
 
         report["result"] = "switching"
@@ -70,12 +77,13 @@ def atomic_promote(
         for incoming, target, original in prepared:
             if original is not None:
                 os.replace(target, original)
-            try:
-                os.replace(incoming, target)
-            except Exception:
-                if original is not None and original.exists():
-                    os.replace(original, target)
-                raise
+            if incoming is not None:
+                try:
+                    os.replace(incoming, target)
+                except Exception:
+                    if original is not None and original.exists():
+                        os.replace(original, target)
+                    raise
             applied.append((target, original))
 
         verify()
@@ -90,7 +98,7 @@ def atomic_promote(
             if original is not None and original.exists():
                 os.replace(original, target)
         for index, (incoming, _target, _original) in enumerate(prepared):
-            if incoming.exists() or incoming.is_symlink():
+            if incoming is not None and (incoming.exists() or incoming.is_symlink()):
                 os.replace(incoming, failed / f"prepared-{index}")
         report["result"] = "failed-auto-rolled-back"
         report["error"] = f"{type(error).__name__}: {error}"
@@ -98,7 +106,7 @@ def atomic_promote(
         raise PromotionError(f"promotionに失敗し、自動rollbackしました: {error}") from error
 
 
-def rollback_replacements(backup_root: Path) -> list[tuple[Path, Path]]:
+def rollback_replacements(backup_root: Path) -> list[tuple[Path | None, Path]]:
     report_path = backup_root / "promotion.json"
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -109,15 +117,18 @@ def rollback_replacements(backup_root: Path) -> list[tuple[Path, Path]]:
     targets = report.get("targets")
     if not isinstance(targets, list) or not targets:
         raise PromotionError("promotion backup inventoryが不正です")
-    replacements: list[tuple[Path, Path]] = []
+    replacements: list[tuple[Path | None, Path]] = []
     for index, item in enumerate(targets):
         if not isinstance(item, dict) or not isinstance(item.get("target"), str):
             raise PromotionError("promotion backup targetが不正です")
-        if item.get("had_original") is not True:
-            raise PromotionError("元々存在しなかったtargetを含むため手動rollbackできません")
-        source = backup_root / "originals" / str(index)
         target = Path(item["target"])
-        if not source.exists() or source.is_symlink() or not target.is_absolute():
+        if not target.is_absolute():
+            raise PromotionError("promotion backup targetが絶対pathではありません")
+        if item.get("had_original") is not True:
+            replacements.append((None, target))
+            continue
+        source = backup_root / "originals" / str(index)
+        if not source.exists() or source.is_symlink():
             raise PromotionError("promotion backup originalまたはtargetが不正です")
         replacements.append((source, target))
     return replacements

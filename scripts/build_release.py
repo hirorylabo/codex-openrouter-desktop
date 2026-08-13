@@ -30,7 +30,7 @@ FILES = (
     "THIRD_PARTY_NOTICES.md",
     "RELEASE_NOTES.md",
 )
-DIRECTORIES = ("adapters", "models", "portable", "profiles", "src", "tests", "scripts")
+DIRECTORIES = ("models", "portable", "profiles", "src", "tests", "scripts")
 EXCLUDED_PARTS = {"node_modules", "__pycache__", ".generated", ".test-output", "dist"}
 SEMVER_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
@@ -145,27 +145,7 @@ def build_sbom(source: Path, version: str, namespace_hash: str, epoch: int) -> d
             "copyrightText": "Copyright (c) 2026 hirorylabo",
         }
     ]
-    lock = json.loads((source / "portable/patcher-js/package-lock.json").read_text(encoding="utf-8"))
-    for package_path, metadata in sorted(lock.get("packages", {}).items()):
-        if not package_path.startswith("node_modules/"):
-            continue
-        name = package_path.removeprefix("node_modules/")
-        package_spdx = spdx_id(f"npm:{name}@{metadata.get('version', '')}")
-        packages.append(
-            {
-                "name": name,
-                "SPDXID": package_spdx,
-                "versionInfo": str(metadata.get("version", "")),
-                "downloadLocation": str(metadata.get("resolved", "NOASSERTION")),
-                "filesAnalyzed": False,
-                "licenseConcluded": "NOASSERTION",
-                "licenseDeclared": str(metadata.get("license", "NOASSERTION")),
-                "copyrightText": "NOASSERTION",
-            }
-        )
-        relationships.append(
-            {"spdxElementId": package_id, "relationshipType": "DEPENDS_ON", "relatedSpdxElement": package_spdx}
-        )
+    # npm依存は無くなった（ASARパッチ方式の撤去でpatcher-jsごと削除）。
     return {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",

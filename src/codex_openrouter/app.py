@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any
 
 
 class AppError(RuntimeError):
@@ -31,6 +29,10 @@ class UserPaths:
     support_root: Path
     credential_helper: Path
     desktop_launcher: Path
+    # 案D: 正本は純正appと共有する ~/.codex。openrouter_app/codex_home は
+    # 旧clone方式の遺産で、migrate後は読み取り専用backupとしてのみ参照する。
+    shared_home: Path
+    state_dir: Path
 
     @classmethod
     def current(cls) -> "UserPaths":
@@ -46,7 +48,37 @@ class UserPaths:
             support_root=home / ".local/share/codex-openrouter-desktop/current",
             credential_helper=home / ".local/bin/codex-openrouter-credential",
             desktop_launcher=home / "Desktop/Codex OpenRouter.app",
+            shared_home=home / ".codex",
+            state_dir=home / ".local/share/codex-openrouter-desktop/state",
         )
+
+    @property
+    def shared_config(self) -> Path:
+        return self.shared_home / "config.toml"
+
+    @property
+    def composite_catalog(self) -> Path:
+        return self.shared_home / "model-catalogs/codex-openrouter.json"
+
+    @property
+    def stock_codex(self) -> Path:
+        return self.stock_app / "Contents/Resources/codex"
+
+    @property
+    def guard_log(self) -> Path:
+        return self.state_dir / "guard.log"
+
+    @property
+    def installed_profile(self) -> Path:
+        return self.state_dir / "profile.json"
+
+    @property
+    def supervisor_state(self) -> Path:
+        return self.state_dir / "supervisor.json"
+
+    @property
+    def guard_token(self) -> Path:
+        return self.state_dir / "guard-token"
 
 
 def sha256(path: Path) -> str:
@@ -88,24 +120,15 @@ def detect_stock(app: Path = Path("/Applications/ChatGPT.app")) -> StockBuild:
     )
 
 
-def load_adapter(index_path: Path, stock: StockBuild) -> dict[str, Any] | None:
-    try:
-        document = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AppError(f"adapter indexを読めません: {exc}") from exc
-    if document.get("schema_version") != 1 or not isinstance(document.get("adapters"), list):
-        raise AppError("adapter index schemaが不正です")
-    matches = [
-        adapter
-        for adapter in document["adapters"]
-        if isinstance(adapter, dict)
-        and adapter.get("chatgpt_version") == stock.version
-        and str(adapter.get("chatgpt_build")) == stock.build
-        and adapter.get("stock_asar_sha256") == stock.asar_sha256
-    ]
-    if len(matches) > 1:
-        raise AppError("同じstock buildへ複数のadapterが一致しました")
-    return matches[0] if matches else None
+def stock_build_id(app: Path = Path("/Applications/ChatGPT.app")) -> tuple[str, str]:
+    """update検知用の (version, build)。
+
+    ASAR hashは意図的に取らない。223MBのハッシュを毎回走らせないため、
+    検知はInfo.plistの2値だけで行う。
+    """
+    if not app.is_dir():
+        raise AppError(f"公式ChatGPT.appが見つかりません: {app}")
+    return _plist_value(app, "CFBundleShortVersionString"), _plist_value(app, "CFBundleVersion")
 
 
 def assert_apple_silicon() -> None:

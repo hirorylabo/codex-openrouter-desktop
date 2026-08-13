@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
-from .app import AppError, UserPaths, assert_apple_silicon, detect_stock, load_adapter
+from .app import AppError, UserPaths, assert_apple_silicon, detect_stock, stock_build_id
 from .auth import (
     AuthenticationError,
     CredentialStore,
@@ -15,9 +17,11 @@ from .auth import (
     prompt_for_key,
     temporary_store,
 )
+from . import configblock
+from .lifecycle import LifecycleLock
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
-from .profile import ProfileError, ResolvedProfile, resolve_profile
+from .profile import ProfileError, ResolvedProfile, resolve_profile, select_profile_path
 
 
 class CliError(RuntimeError):
@@ -31,19 +35,16 @@ def root() -> Path:
     return Path(value).resolve()
 
 
-def profile_path(argument: str, paths: UserPaths) -> Path:
-    if argument != "default":
-        path = Path(argument).expanduser().resolve()
-    elif (paths.codex_home / "profile.json").is_file():
-        path = paths.codex_home / "profile.json"
-    else:
-        path = root() / "profiles/default.json"
-    if not path.is_file() or path.is_symlink():
-        raise CliError(f"profileが見つからないかsymlinkです: {path}")
-    return path
+def profile_path(argument: str | None, paths: UserPaths) -> Path:
+    return select_profile_path(
+        argument=argument,
+        source_default=root() / "profiles/default.json",
+        installed=paths.installed_profile,
+        legacy=paths.codex_home / "profile.json",
+    )
 
 
-def resolved_profile(argument: str, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
+def resolved_profile(argument: str | None, paths: UserPaths) -> tuple[Path, ResolvedProfile]:
     selected = profile_path(argument, paths)
     return selected, resolve_profile(root() / "models/registry.json", selected)
 
@@ -77,17 +78,21 @@ def warn_limit(metadata: dict) -> None:
 def check_command(args: argparse.Namespace) -> int:
     paths = UserPaths.current()
     assert_apple_silicon()
-    stock = detect_stock(paths.stock_app)
+    version, build = stock_build_id(paths.stock_app)
     selected, profile = resolved_profile(args.profile, paths)
-    adapter = load_adapter(root() / "adapters/index.json", stock)
-    print(f"architecture=arm64")
-    print(f"ChatGPT={stock.version} build {stock.build}")
-    print(f"stock_asar={stock.asar_sha256}")
+    print("architecture=arm64")
+    print(f"ChatGPT={version} build {build}  (純正appは変更しません)")
     print(f"profile={selected} models={len(profile.models)} default={profile.default_model}")
-    if adapter:
-        print(f"adapter={adapter['id']} strategy={adapter['patch_strategy']}")
+    print(f"shared_home={paths.shared_home}")
+    config = paths.shared_config
+    if config.is_file():
+        text = config.read_text(encoding="utf-8")
+        print(f"catalog_block={'present' if configblock.has_block(text, 'catalog') else 'absent'}")
+        print(f"provider_block={'present' if configblock.has_block(text, 'provider') else 'absent'}")
+        print(f"model={configblock.read_top_level(text, 'model')}")
+        print(f"model_provider={configblock.read_top_level(text, 'model_provider')}")
     else:
-        print("adapter=unknown (update will create a candidate only)")
+        print("shared config=missing (純正appを一度起動してください)")
     if paths.credential_helper.is_file():
         print(f"keychain={'available' if CredentialStore(paths.credential_helper).exists() else 'missing'}")
     else:
@@ -98,13 +103,13 @@ def check_command(args: argparse.Namespace) -> int:
 
 def setup_command(args: argparse.Namespace) -> int:
     paths = UserPaths.current()
+    with LifecycleLock(paths):
+        return _setup_locked(args, paths)
+
+
+def _setup_locked(args: argparse.Namespace, paths: UserPaths) -> int:
     assert_apple_silicon()
-    stock = detect_stock(paths.stock_app)
-    adapter = load_adapter(root() / "adapters/index.json", stock)
-    if adapter is None:
-        raise CliError(
-            "未知buildです。既存installationからcodex-openrouter updateを実行し、candidateを目視承認してください"
-        )
+    detect_stock(paths.stock_app)
     selected, profile = resolved_profile(args.profile, paths)
     store, temporary = credential_store(paths)
     try:
@@ -122,16 +127,15 @@ def setup_command(args: argparse.Namespace) -> int:
     finally:
         if temporary is not None:
             temporary.cleanup()
-    command = [
-        str(root() / "portable/install.sh"),
-        "--install",
-        "--workspace",
-        str(Path(args.workspace).expanduser().resolve()),
-        "--profile",
-        str(selected),
-    ]
-    print("INFO: setup終盤のnetwork canaryは少量のOpenRouter API利用料が発生する場合があります。")
-    return subprocess.run(command).returncode
+    from .install import _install_unlocked
+
+    return _install_unlocked(
+        root(),
+        paths,
+        args.profile,
+        workspace=Path(args.workspace).expanduser().resolve(),
+        network_check=False,
+    )
 
 
 def delegate(executable: Path, arguments: list[str]) -> int:
@@ -157,7 +161,7 @@ def auth_command(args: argparse.Namespace) -> int:
             print("OpenRouter側のkey失効は https://openrouter.ai/settings/keys で行ってください。")
             return 0
 
-        _, profile = resolved_profile("default", paths)
+        _, profile = resolved_profile(None, paths)
         if args.auth_action == "rotate" and not store.exists():
             raise CliError("rotate対象のローカルcredentialがありません。auth loginを使用してください")
         key = obtain_key(args.method)
@@ -173,11 +177,20 @@ def auth_command(args: argparse.Namespace) -> int:
 
 
 def rollback_command(_args: argparse.Namespace) -> int:
+    """runtimeファイルをupgrade前へ戻す。
+
+    案Dでは純正appを触らないので、復元対象はこのツール自身のファイルだけ。
+    """
+    from .promotion import atomic_promote, rollback_replacements
+
     paths = UserPaths.current()
-    backup_root = paths.home / "Applications/ChatGPT OpenRouter Backups"
-    backups = sorted(backup_root.glob("*.app"), key=lambda path: path.stat().st_mtime, reverse=True)
-    upgrade_root = paths.codex_home / "upgrade-backups"
-    upgrade_backups = sorted(
+    with LifecycleLock(paths):
+        return _rollback_locked(paths)
+
+
+def _rollback_locked(paths: UserPaths) -> int:
+    upgrade_root = paths.state_dir / "upgrade-backups"
+    backups = sorted(
         (
             path
             for path in upgrade_root.glob("*")
@@ -186,69 +199,202 @@ def rollback_command(_args: argparse.Namespace) -> int:
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    latest_app_time = backups[0].stat().st_mtime if backups else -1
-    latest_upgrade_time = upgrade_backups[0].stat().st_mtime if upgrade_backups else -1
-    if not backups and not upgrade_backups:
-        raise CliError("復元可能なappまたはupgrade backupがありません")
-    if paths.openrouter_app.exists():
-        if process_pids(paths.openrouter_app / "Contents/MacOS/ChatGPT"):
-            raise CliError("専用appを通常終了してからrollbackしてください")
-    if latest_upgrade_time >= latest_app_time:
-        from .promotion import atomic_promote, rollback_replacements
-
-        source_backup = upgrade_backups[0]
-        confirmation = input(
-            f"{source_backup.name} のupgrade前状態へ戻します。ROLLBACKと入力して確認: "
-        )
-        if confirmation != "ROLLBACK":
-            raise CliError("rollbackを中止しました")
-        timestamp = subprocess.check_output(["/bin/date", "+%Y%m%d-%H%M%S"], text=True).strip()
-        rollback_backup = upgrade_root / f"manual-rollback-{timestamp}"
-
-        def verify() -> None:
-            result = subprocess.run([str(paths.bin_dir / "codex-openrouter-doctor")])
-            if result.returncode != 0:
-                raise CliError("復元後doctorに失敗しました")
-
-        atomic_promote(rollback_replacements(source_backup), rollback_backup, verify)
-        print(f"upgrade前状態を復元しました: {source_backup}")
-        print(f"rollback直前状態のbackup: {rollback_backup}")
-        return 0
-    source = backups[0]
-    metadata = None
-    marker = "ChatGPT OpenRouter.pre-candidate-"
-    if source.name.startswith(marker) and source.name.endswith(".app"):
-        timestamp = source.name[len(marker) : -len(".app")]
-        candidate_metadata = backup_root / f"metadata-pre-candidate-{timestamp}"
-        if not candidate_metadata.is_dir():
-            raise CliError(f"candidate backupと組になるmetadataがありません: {candidate_metadata}")
-        metadata = candidate_metadata
-    confirmation = input(f"{source.name} を復元します。ROLLBACKと入力して確認: ")
+    if not backups:
+        raise CliError("復元可能なupgrade backupがありません")
+    if process_pids(paths.stock_app / "Contents/MacOS/ChatGPT"):
+        raise CliError("ChatGPT.appを終了してからrollbackしてください")
+    source_backup = backups[0]
+    confirmation = input(
+        f"{source_backup.name} のupgrade前状態へ戻します。ROLLBACKと入力して確認: "
+    )
     if confirmation != "ROLLBACK":
         raise CliError("rollbackを中止しました")
     timestamp = subprocess.check_output(["/bin/date", "+%Y%m%d-%H%M%S"], text=True).strip()
+    rollback_backup = upgrade_root / f"manual-rollback-{timestamp}"
+
+    def verify() -> None:
+        from .supervisor import Supervisor
+
+        registry_path = paths.support_root / "models/registry.json"
+        selected = select_profile_path(
+            argument=None,
+            source_default=paths.support_root / "profiles/default.json",
+            installed=paths.installed_profile,
+            legacy=paths.codex_home / "profile.json",
+        )
+        profile = resolve_profile(registry_path, selected)
+        if paths.shared_config.is_file():
+            Supervisor(paths, registry_path, profile=profile).self_heal()
+        if subprocess.run([str(paths.bin_dir / "codex-openrouter-doctor")]).returncode != 0:
+            raise CliError("復元後doctorに失敗しました")
+
+    atomic_promote(rollback_replacements(source_backup), rollback_backup, verify)
+    print(f"upgrade前状態を復元しました: {source_backup}")
+    print(f"rollback直前状態のbackup: {rollback_backup}")
+    return 0
+
+
+def launch_command(args: argparse.Namespace) -> int:
+    """事前処理をしてから純正appを起動し、終了したら後始末する。"""
+    from .supervisor import Supervisor
+
+    paths = UserPaths.current()
+    assert_apple_silicon()
+    workspace = Path(args.path).expanduser().resolve() if args.path else None
+    _selected, profile = resolved_profile(None, paths)
+    return Supervisor(
+        paths,
+        root() / "models/registry.json",
+        profile=profile,
+        workspace=workspace,
+    ).run()
+
+
+def migrate_command(args: argparse.Namespace) -> int:
+    """旧clone方式(v0.1.x)から案Dへ移行する。
+
+    旧 ~/.codex-openrouter は消さない。OpenRouterで記録した旧threadがあるため、
+    読み取り専用のbackupとして残す。
+    """
+    from .supervisor import Supervisor
+
+    paths = UserPaths.current()
+    with LifecycleLock(paths):
+        return _migrate_locked(args, paths)
+
+
+def _migrate_locked(args: argparse.Namespace, paths: UserPaths) -> int:
+    actions: list[str] = []
+    if process_pids(paths.openrouter_app / "Contents/MacOS/ChatGPT"):
+        raise CliError("旧専用appを終了してからmigrateしてください")
+
+    if not paths.shared_config.is_file():
+        raise CliError(
+            f"{paths.shared_config} がありません。純正ChatGPT.appを一度起動してください。"
+        )
+
+    _selected, profile = resolved_profile(None, paths)
+    supervisor = Supervisor(paths, root() / "models/registry.json", profile=profile)
+    supervisor.self_heal()
+    actions.append("[model_providers.openrouter] を ~/.codex/config.toml へ永続化しました")
+
     if paths.openrouter_app.exists():
-        preserved = backup_root / f"ChatGPT OpenRouter.failed-before-rollback-{timestamp}.app"
-        paths.openrouter_app.rename(preserved)
-    subprocess.run(["/usr/bin/ditto", str(source), str(paths.openrouter_app)], check=True)
-    if metadata is not None:
-        from .candidate import restore_live_state
+        confirmation = input(
+            f"旧専用app {paths.openrouter_app} を削除します。MIGRATEと入力して確認: "
+        )
+        if confirmation != "MIGRATE":
+            raise CliError("migrateを中止しました")
+        shutil.rmtree(paths.openrouter_app)
+        actions.append(f"旧専用appを削除しました: {paths.openrouter_app}")
 
-        restore_live_state(paths, metadata)
-    print(f"復元しました: {source}")
-    return delegate(paths.bin_dir / "codex-openrouter-doctor", [])
+    if paths.codex_home.is_dir():
+        if getattr(args, "keep_all", False):
+            actions.append(f"旧home {paths.codex_home} はそのまま残しました")
+        else:
+            freed = compact_legacy_home(paths.codex_home)
+            actions.append(
+                f"旧home を sessions だけ残して圧縮しました（{freed} 解放 / {paths.codex_home}）"
+            )
+    for message in actions:
+        print(f"- {message}")
+    print("MIGRATE: PASS")
+    return 0
 
 
-def update_command(args: argparse.Namespace) -> int:
-    from .candidate import update
+# 案Dで参照されなくなる旧home配下。sessionsとhistoryだけ残す。
+LEGACY_DISPOSABLE = (
+    "candidates",      # ASARパッチ方式のcandidate clone群。大半の容量はここ
+    "user-data",       # 旧clone appのElectron userData
+    "plugins",
+    "computer-use",
+    "upgrade-backups",
+    "logs",
+    "cache",
+    "tmp",
+    "backups",
+    "archived_worktrees",
+    "worktrees",
+)
 
-    return update(root(), UserPaths.current(), args.profile)
+
+def _human(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{size}B"
+        size /= 1024
+    return f"{size:.1f}GB"
+
+
+def compact_legacy_home(home: Path) -> str:
+    """旧homeを sessions 中心に絞る。sessionsとhistoryには触らない。"""
+    freed = 0
+    for name in LEGACY_DISPOSABLE:
+        target = home / name
+        if not target.is_dir() or target.is_symlink():
+            continue
+        for path in target.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                freed += path.stat().st_size
+        shutil.rmtree(target)
+    # logsのsqliteだけ消す。memories/goals/stateは小さく、かつ利用者の内容なので残す。
+    for path in home.glob("logs_*.sqlite*"):
+        if path.is_file():
+            freed += path.stat().st_size
+            path.unlink()
+    return _human(freed)
+
+
+def guard_log_command(args: argparse.Namespace) -> int:
+    """guardが弾いたmodelを集計する（巻き込みスキャン）。
+
+    Codexの更新ごとに、巻き込まれる背景機能の増減を追うために使う。
+    """
+    paths = UserPaths.current()
+    if not paths.guard_log.is_file():
+        print(f"guard logがありません: {paths.guard_log}")
+        return 0
+    denied: dict[str, int] = {}
+    forwarded: dict[str, int] = {}
+    for line in paths.guard_log.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        bucket = denied if record.get("decision") == "denied" else forwarded
+        model = str(record.get("model"))
+        bucket[model] = bucket.get(model, 0) + 1
+    print(f"guard log: {paths.guard_log}")
+    print("--- 中継した (OpenRouter) ---")
+    for model, count in sorted(forwarded.items(), key=lambda item: -item[1]):
+        print(f"  {count:6d}  {model}")
+    print("--- 遮断した (巻き込み) ---")
+    for model, count in sorted(denied.items(), key=lambda item: -item[1]):
+        print(f"  {count:6d}  {model}")
+    if not denied:
+        print("  (なし)")
+    if args.clear:
+        paths.guard_log.unlink()
+        print("guard logを消去しました。")
+    return 0
 
 
 def upgrade_command(args: argparse.Namespace) -> int:
-    from .upgrade import upgrade
+    from .upgrade import auto_upgrade, upgrade
 
-    return upgrade(root(), UserPaths.current(), args.profile)
+    paths = UserPaths.current()
+    if args.if_needed:
+        return auto_upgrade(paths, args.profile)
+    source_root = root()
+    if source_root == paths.support_root:
+        # PATH上の codex-openrouter は source root をインストール先へ解決する。
+        # そこから打つと自分自身を再インストールするだけで何も新しくならない。
+        print(
+            "WARNING: インストール済みツリー自身をsourceにしています。"
+            "新しい内容を反映するにはリポジトリの ./codex-openrouter を使ってください。"
+        )
+    return upgrade(source_root, paths, args.profile)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,18 +402,18 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     check = subcommands.add_parser("check")
-    check.add_argument("--profile", default="default")
+    check.add_argument("--profile", default=None)
     check.set_defaults(func=check_command)
 
     setup = subcommands.add_parser("setup")
     setup.add_argument("--workspace", default=str(Path.home() / "Documents"))
-    setup.add_argument("--profile", default="default")
+    setup.add_argument("--profile", default=None)
     setup.add_argument("--auth", choices=("oauth", "paste"), default="oauth")
     setup.set_defaults(func=setup_command)
 
     launch = subcommands.add_parser("launch")
     launch.add_argument("path", nargs="?", default=os.getcwd())
-    launch.set_defaults(func=lambda args: delegate(UserPaths.current().bin_dir / "codex-openrouter-app", [args.path]))
+    launch.set_defaults(func=launch_command)
 
     doctor = subcommands.add_parser("doctor")
     doctor.add_argument("--network", action="store_true")
@@ -280,12 +426,22 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    update_parser = subcommands.add_parser("update")
-    update_parser.add_argument("--profile", default="default")
-    update_parser.set_defaults(func=update_command)
+    migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("--keep-all", action="store_true",
+                         help="旧 ~/.codex-openrouter を圧縮せずそのまま残す")
+    migrate.set_defaults(func=migrate_command)
+
+    guard_log = subcommands.add_parser("guard-log")
+    guard_log.add_argument("--clear", action="store_true")
+    guard_log.set_defaults(func=guard_log_command)
 
     upgrade_parser = subcommands.add_parser("upgrade")
-    upgrade_parser.add_argument("--profile", default="default")
+    upgrade_parser.add_argument("--profile", default=None)
+    upgrade_parser.add_argument(
+        "--if-needed",
+        action="store_true",
+        help="導入元に差分があるときだけ更新する（ランチャーがクリック時に使う）",
+    )
     upgrade_parser.set_defaults(func=upgrade_command)
 
     rollback = subcommands.add_parser("rollback")
@@ -303,8 +459,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .candidate import CandidateError
+    from .install import InstallError
+    from .lifecycle import LifecycleLockError
     from .promotion import PromotionError
+    from .supervisor import SupervisorError
     from .upgrade import UpgradeError
 
     try:
@@ -313,11 +471,14 @@ def main(argv: list[str] | None = None) -> int:
     except (
         AppError,
         AuthenticationError,
-        CandidateError,
+        configblock.ConfigBlockError,
+        InstallError,
+        LifecycleLockError,
         OpenRouterError,
         ProfileError,
         ProcessError,
         PromotionError,
+        SupervisorError,
         UpgradeError,
         CliError,
         OSError,
@@ -325,3 +486,12 @@ def main(argv: list[str] | None = None) -> int:
     ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
+
+
+if __name__ == "__main__":
+    # ランチャーは `python3 -m codex_openrouter.cli launch` で入る。
+    # このguardが無いとmoduleを読み込むだけで何もせず終了する。
+    os.environ.setdefault(
+        "CODEX_OPENROUTER_SOURCE_ROOT", str(Path(__file__).resolve().parents[2])
+    )
+    raise SystemExit(main())

@@ -6,6 +6,8 @@
   <string>Codex OpenRouter</string>
   <key>CodexDefaultWorkspace</key>
   <string>__DEFAULT_WORKSPACE__</string>
+  <key>CodexLauncherLog</key>
+  <string>__LAUNCHER_LOG__</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

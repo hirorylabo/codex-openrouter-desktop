@@ -14,7 +14,11 @@ from codex_openrouter import auth
 from codex_openrouter import cli
 from codex_openrouter import openrouter
 from codex_openrouter.profile import ResolvedProfile
-from codex_openrouter.profile import ProfileError, render_provider_mapping, resolve_profile
+from codex_openrouter.profile import (
+    ProfileError,
+    resolve_profile,
+    select_profile_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,8 +36,7 @@ class ProfileTests(unittest.TestCase):
         profile = resolve_profile(REGISTRY, ROOT / "profiles/default.json")
         self.assertEqual(5, len(profile.models))
         self.assertEqual("deepseek/deepseek-v4-pro", profile.default_model)
-        mapping = render_provider_mapping(profile)
-        self.assertEqual(set(profile.models), set(mapping["model_providers"]))
+        self.assertEqual(set(profile.models), set(profile.registry))
 
     def test_custom_profile_can_use_verified_subset(self) -> None:
         temporary, path = self.write_profile(
@@ -47,6 +50,34 @@ class ProfileTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         profile = resolve_profile(REGISTRY, path)
         self.assertIsNone(profile.default_effort)
+        self.assertEqual(64, len(profile.digest))
+
+    def test_omitted_profile_preserves_installed_but_explicit_default_replaces_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_default = root / "default.json"
+            installed = root / "installed.json"
+            legacy = root / "legacy.json"
+            for path in (source_default, installed, legacy):
+                path.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                installed,
+                select_profile_path(
+                    argument=None,
+                    source_default=source_default,
+                    installed=installed,
+                    legacy=legacy,
+                ),
+            )
+            self.assertEqual(
+                source_default,
+                select_profile_path(
+                    argument="default",
+                    source_default=source_default,
+                    installed=installed,
+                    legacy=legacy,
+                ),
+            )
 
     def test_duplicate_and_unknown_models_fail(self) -> None:
         for models in (
@@ -80,6 +111,53 @@ class ProfileTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_fresh_setup_validates_once_then_installs_without_permanent_helper(self) -> None:
+        from codex_openrouter import install as install_module
+
+        key = "sk-or-v1-" + "z" * 64
+
+        class Store:
+            stored = False
+
+            def exists(self) -> bool:
+                return self.stored
+
+            def store(self, _value: str) -> None:
+                self.stored = True
+
+        store = Store()
+        temporary = mock.Mock()
+        profile = ResolvedProfile(
+            name="one",
+            models=("minimax/minimax-m3",),
+            default_model="minimax/minimax-m3",
+            default_effort=None,
+            registry={},
+        )
+        args = SimpleNamespace(profile=None, auth="paste", workspace="/tmp/workspace")
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(
+                 cli.UserPaths,
+                 "current",
+                 return_value=SimpleNamespace(
+                     state_dir=Path(directory) / "state",
+                     stock_app=Path("/Applications/ChatGPT.app"),
+                 ),
+             ), \
+             mock.patch.object(cli, "assert_apple_silicon"), \
+             mock.patch.object(cli, "detect_stock"), \
+             mock.patch.object(cli, "resolved_profile", return_value=(Path("profile.json"), profile)), \
+             mock.patch.object(cli, "credential_store", return_value=(store, temporary)), \
+             mock.patch.object(cli, "obtain_key", return_value=key), \
+             mock.patch.object(cli, "validate_key_and_profile", return_value={"limit": 10}) as validate, \
+             mock.patch.object(cli, "root", return_value=ROOT), \
+             mock.patch.object(install_module, "_install_unlocked", return_value=0) as install:
+            self.assertEqual(0, cli.setup_command(args))
+        validate.assert_called_once_with(key, {"minimax/minimax-m3"})
+        self.assertTrue(store.stored)
+        temporary.cleanup.assert_called_once()
+        self.assertFalse(install.call_args.kwargs["network_check"])
+
     def test_hidden_paste_accepts_key_without_echo(self) -> None:
         key = "sk-or-v1-" + "a" * 64
         with mock.patch("getpass.getpass", return_value=key) as prompt:
