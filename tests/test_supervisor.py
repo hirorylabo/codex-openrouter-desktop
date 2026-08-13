@@ -213,6 +213,31 @@ class UpdateFollowTests(SupervisorTestCase):
             self.assertTrue(self.supervisor.refresh_catalog_if_needed())
         self.assertEqual(len(calls), 2)
 
+    def test_catalog_is_regenerated_when_the_profile_changes(self):
+        """設定変更後の次回起動で、選択モデルだけのcatalogへ組み直す。"""
+        model = "minimax/minimax-m3"
+        narrowed = ResolvedProfile(
+            name="one",
+            models=(model,),
+            default_model=model,
+            default_effort=REGISTRY[model].get("default_effort"),
+            registry={model: REGISTRY[model]},
+        )
+        with mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")), \
+             mock.patch.object(
+                 sup.catalog, "generate", return_value=self.paths.composite_catalog
+             ) as generate:
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+            self.assertFalse(self.supervisor.refresh_catalog_if_needed())
+            # buildは同じでもprofileが変われば組み直す。
+            changed = sup.Supervisor(
+                self.paths, REGISTRY_PATH, profile=narrowed, port=0
+            )
+            self.assertTrue(changed.refresh_catalog_if_needed())
+            self.assertFalse(changed.refresh_catalog_if_needed())
+        self.assertEqual((model,), generate.call_args.kwargs["model_ids"])
+        self.assertEqual(2, generate.call_count)
+
     def test_state_survives_new_instance(self):
         with mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")), \
              mock.patch.object(sup.catalog, "generate", return_value=self.paths.composite_catalog):

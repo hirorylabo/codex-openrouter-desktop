@@ -1,10 +1,14 @@
 import AppKit
 import Foundation
 
-final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
+/// `Codex OpenRouter.app` の本体。小型の管理ランチャーとして振る舞う。
+///
+/// 常駐daemonにはしない。管理画面を閉じるか、OpenRouterセッションが終われば
+/// ランチャーも終わる。純正 `/Applications/ChatGPT.app` は一切変更しない。
+final class LauncherApp: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let userHome = FileManager.default.homeDirectoryForCurrentUser.path
-    private lazy var launcherPath = "\(userHome)/.local/bin/codex-openrouter-app"
-    private lazy var defaultWorkspace =
+    private lazy var helperPath = "\(userHome)/.local/bin/codex-openrouter-app"
+    private lazy var fallbackWorkspace =
         Bundle.main.object(forInfoDictionaryKey: "CodexDefaultWorkspace") as? String
         ?? "\(userHome)/Documents"
     // 案Dでは専用cloneを作らない。前面化の相手は純正appそのもの。
@@ -16,57 +20,213 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
     // upgrade.py の STATUS_UPDATING / STATUS_LAUNCHING と同じ文字列であること。
     private static let statusUpdating = "STATUS: updating"
     private static let statusLaunching = "STATUS: launching"
-    private var receivedWorkspace = false
+
+    private var workspace = ""
+    private var panel: LauncherPanel?
+    private var settingsWindow: ModelSettingsWindow?
     private var launchInProgress = false
     private var outputTail = ""
     private var progressWindow: NSWindow?
     private var ignoredStockProcessIdentifiers = Set<pid_t>()
 
+    // MARK: - ライフサイクル
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        installMainMenu()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self else { return }
-            if !self.receivedWorkspace {
-                self.launch(workspace: self.defaultWorkspace)
+        if workspace.isEmpty {
+            workspace = fallbackWorkspace
+        }
+        presentPanel()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // 起動中は管理画面を閉じたまま生き残る必要がある。終了判断は自分で持つ。
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if launchInProgress {
+            activateStockWindow()
+        } else {
+            presentPanel()
+        }
+        return true
+    }
+
+    /// folder dropとOpen With。workspaceだけ差し替え、起動は利用者の操作を待つ。
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let path = urls.first?.path else { return }
+        adopt(workspace: path)
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        guard let path = filenames.first, adopt(workspace: path) else {
+            sender.reply(toOpenOrPrint: .failure)
+            return
+        }
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    @discardableResult
+    private func adopt(workspace path: String) -> Bool {
+        // 起動後のdropは受け取らない。workspaceは起動時に純正appへ渡り済みで、
+        // ここで差し替えても効かないうえ、隠した管理画面が戻ってくる。
+        guard !launchInProgress else {
+            activateStockWindow()
+            return false
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            showError("workspaceはフォルダーを指定してください:\n\(path)")
+            return false
+        }
+        workspace = path
+        presentPanel()
+        return true
+    }
+
+    // MARK: - メニュー
+
+    private func installMainMenu() {
+        let name = "Codex OpenRouter"
+        let mainMenu = NSMenu()
+
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(
+            withTitle: "\(name)について",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        applicationMenu.addItem(.separator())
+        // macOS標準の設定入口。⌘, とAppメニューの両方から開く。
+        applicationMenu.addItem(
+            withTitle: "設定…", action: #selector(openSettings(_:)), keyEquivalent: ","
+        )
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(
+            withTitle: "\(name)を隠す", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"
+        )
+        let hideOthers = applicationMenu.addItem(
+            withTitle: "ほかを隠す",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        applicationMenu.addItem(
+            withTitle: "すべてを表示",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        )
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(
+            withTitle: "\(name)を終了",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "ウインドウ")
+        windowMenu.addItem(
+            withTitle: "しまう", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"
+        )
+        windowMenu.addItem(
+            withTitle: "閉じる", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"
+        )
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApplication.shared.mainMenu = mainMenu
+        NSApplication.shared.windowsMenu = windowMenu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(openSettings(_:)) {
+            return !launchInProgress
+        }
+        return true
+    }
+
+    // MARK: - 管理画面
+
+    private func presentPanel() {
+        if panel == nil {
+            panel = LauncherPanel(
+                onLaunch: { [weak self] in self?.startOpenRouter() },
+                onSettings: { [weak self] in self?.openSettings(nil) },
+                onClose: { [weak self] in self?.panelClosed() }
+            )
+        }
+        panel?.show(workspace: workspace)
+        panel?.present()
+        refreshPanel()
+    }
+
+    private func refreshPanel() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = Result { try ProfileBridge.show() }
+            DispatchQueue.main.async {
+                guard let panel = self?.panel else { return }
+                switch outcome {
+                case .success(let snapshot):
+                    panel.show(snapshot: snapshot)
+                case .failure(let error):
+                    panel.show(failure: error.localizedDescription)
+                }
             }
         }
     }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        guard let workspace = urls.first?.path else { return }
-        receivedWorkspace = true
-        launch(workspace: workspace)
+    private func panelClosed() {
+        // 管理画面を閉じたら終わる。起動済みなら supervisor の終了で終わる。
+        guard !launchInProgress else { return }
+        settingsWindow?.window.close()
+        DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
     }
 
-    func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        guard let workspace = filenames.first else {
-            sender.reply(toOpenOrPrint: .failure)
-            return
+    @objc private func openSettings(_ sender: Any?) {
+        guard !launchInProgress else { return }
+        if settingsWindow == nil {
+            settingsWindow = ModelSettingsWindow(
+                onClose: { [weak self] in self?.settingsWindow = nil },
+                onApplied: { [weak self] snapshot in self?.panel?.show(snapshot: snapshot) }
+            )
         }
-        receivedWorkspace = true
-        launch(workspace: workspace)
-        sender.reply(toOpenOrPrint: .success)
+        settingsWindow?.present()
     }
 
-    private func launch(workspace: String) {
+    // MARK: - 起動
+
+    private func startOpenRouter() {
         guard !launchInProgress else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: workspace, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             showError("workspaceはフォルダーを指定してください:\n\(workspace)")
-            NSApplication.shared.terminate(nil)
             return
         }
 
         launchInProgress = true
+        panel?.setLaunching(true)
+        settingsWindow?.window.close()
+
         let stockApplications = runningStockApplications()
         guard !stockApplications.isEmpty else {
-            startLauncherHelper(workspace: workspace)
+            beginHelper()
             return
         }
 
         guard confirmSwitchFromStockApp() else {
+            launchInProgress = false
+            panel?.setLaunching(false)
             stockApplications.first?.activate(options: [.activateAllWindows])
-            NSApplication.shared.terminate(nil)
             return
         }
 
@@ -78,8 +238,9 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
             }
         }
         guard terminationRequested else {
+            launchInProgress = false
+            panel?.setLaunching(false)
             showError("純正ChatGPTへ終了を要求できませんでした。\n手動で終了してから、もう一度お試しください。")
-            NSApplication.shared.terminate(nil)
             return
         }
 
@@ -91,27 +252,35 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.hideProgress()
             guard terminated else {
+                self.launchInProgress = false
+                self.panel?.setLaunching(false)
                 self.showError(
                     "純正ChatGPTが30秒以内に終了しませんでした。\n" +
                     "手動で終了してから、もう一度お試しください。"
                 )
-                NSApplication.shared.terminate(nil)
                 return
             }
-            self.startLauncherHelper(workspace: workspace)
+            self.beginHelper()
         }
+    }
+
+    private func beginHelper() {
+        panel?.hide()
+        showProgress("OpenRouterモードを準備しています…")
+        startLauncherHelper(workspace: workspace)
     }
 
     private func startLauncherHelper(workspace: String) {
         let process = Process()
         let outputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: launcherPath)
+        process.executableURL = URL(fileURLWithPath: helperPath)
         process.arguments = [workspace]
         process.standardOutput = outputPipe
         process.standardError = outputPipe
         do {
             try process.run()
         } catch {
+            hideProgress()
             showError("Codex OpenRouterを起動できませんでした。\n\(error.localizedDescription)")
             NSApplication.shared.terminate(nil)
             return
@@ -275,8 +444,3 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 }
-
-let application = NSApplication.shared
-let launcherDelegate = CodexOpenRouterLauncher()
-application.delegate = launcherDelegate
-application.run()

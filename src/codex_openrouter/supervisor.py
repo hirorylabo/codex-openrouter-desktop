@@ -27,12 +27,12 @@ from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
 from .processes import process_pids
-from .profile import ResolvedProfile, resolve_profile
+from .profile import ResolvedProfile, installed_profile
 
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 class SupervisorError(RuntimeError):
@@ -53,6 +53,9 @@ class State:
     pending_default_model: bool = False
     guard_port: int | None = None
     guard_nonce: str | None = None
+    # 現在のcatalogがどのprofileから作られたか。build更新だけでなくprofile変更でも
+    # 組み直すために持つ。
+    catalog_profile_digest: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "State":
@@ -118,12 +121,9 @@ class Supervisor:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
         self.all_registry_models = frozenset(registry)
         if profile is None:
-            profile_path = (
-                paths.installed_profile
-                if paths.installed_profile.is_file()
-                else registry_path.parent.parent / "profiles/default.json"
-            )
-            profile = resolve_profile(registry_path, profile_path)
+            # 呼び出し側はふつう解決済みprofileを渡す。渡らなかった場合も
+            # doctor・設定画面と同じ規則で選び直す。
+            _selected, profile = installed_profile(registry_path, paths)
         self.profile = profile
         self.registry_models = profile.registry
         self.state_path = paths.supervisor_state
@@ -198,12 +198,18 @@ class Supervisor:
 
     # [3] update追従 --------------------------------------------------------
     def refresh_catalog_if_needed(self, force: bool = False) -> bool:
-        """version/buildが変わったときだけcatalogを組み直す。
+        """version/buildかprofileが変わったときだけcatalogを組み直す。
 
         ASAR hashは見ない。223MBのハッシュを毎回走らせないため。
+
+        profile digestも見るのは、pickerとguard・watcher・doctorが必ず同じ集合を
+        指すため。設定画面のapplyは旧catalogを消すのでここは素通りするが、
+        `upgrade --profile` のようにcatalogを消さない経路でも自己回復する。
         """
         version, build = stock_build_id(self.paths.stock_app)
-        unchanged = (version, build) == (self.state.version, self.state.build)
+        unchanged = (version, build) == (self.state.version, self.state.build) and (
+            self.state.catalog_profile_digest == self.profile.digest
+        )
         if unchanged and self.paths.composite_catalog.is_file() and not force:
             return False
         catalog.generate(
@@ -214,6 +220,7 @@ class Supervisor:
             model_ids=self.profile.models,
         )
         self.state.version, self.state.build = version, build
+        self.state.catalog_profile_digest = self.profile.digest
         self.state.save(self.state_path)
         return True
 

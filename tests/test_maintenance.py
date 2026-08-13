@@ -174,12 +174,13 @@ class AutoUpgradeTests(unittest.TestCase):
         self.state = self.home / "support/state"
         self.state.mkdir(parents=True)
         upgrade_module.copy_support(self.source, self.support)
+        self.receipt = self.state / "install-manifest.json"
         self.paths = mock.Mock(
             home=self.home,
             support_root=self.support,
             state_dir=self.state,
+            install_manifest=self.receipt,
         )
-        self.receipt = self.state / "install-manifest.json"
         self.write_receipt({"schema_version": 5, "source_root": str(self.source)})
 
     def write_receipt(self, document: dict) -> None:

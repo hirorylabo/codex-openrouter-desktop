@@ -10,21 +10,18 @@ verifyが落ちれば全targetが元へ戻る。
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import shutil
 import subprocess
 
 from . import __version__
-from .app import UserPaths, assert_apple_silicon, detect_stock
+from .app import UserPaths, assert_apple_silicon, detect_stock, installed_workspace
 from .auth import temporary_store
 from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
-from .upgrade import (
-    promote_runtime,
-    selected_profile,
-)
+from .profile import installed_profile
+from .upgrade import promote_runtime
 
 # v0.1.xの成果物。案Dでは使わないので掃除する。
 RETIRED_BINARIES = ("codex-openrouter-rebuild", "codex-openrouter-refresh")
@@ -47,7 +44,9 @@ def preflight(paths: UserPaths, source_root: Path, profile_argument: str | None)
         raise InstallError("ChatGPT.appを終了してから実行してください")
     stock = detect_stock(paths.stock_app)
 
-    _profile_path, profile = selected_profile(source_root, paths, profile_argument)
+    _profile_path, profile = installed_profile(
+        source_root / "models/registry.json", paths, argument=profile_argument
+    )
     return stock, profile
 
 
@@ -97,13 +96,8 @@ def _install_unlocked(
         finally:
             temporary.cleanup()
 
-    receipt = paths.state_dir / "install-manifest.json"
     if workspace is None:
-        workspace = paths.home / "Documents"
-        if receipt.is_file() and not receipt.is_symlink():
-            saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
-            if isinstance(saved, str) and Path(saved).is_dir():
-                workspace = Path(saved)
+        workspace = installed_workspace(paths)
     workspace.mkdir(parents=True, exist_ok=True)
     backup_root = promote_runtime(source_root, paths, stock, workspace, profile)
 

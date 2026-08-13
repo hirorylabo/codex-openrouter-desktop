@@ -16,6 +16,8 @@ from codex_openrouter import openrouter
 from codex_openrouter.profile import ResolvedProfile
 from codex_openrouter.profile import (
     ProfileError,
+    parse_apply_payload,
+    resolve_apply_payload,
     resolve_profile,
     select_profile_path,
 )
@@ -78,6 +80,42 @@ class ProfileTests(unittest.TestCase):
                     legacy=legacy,
                 ),
             )
+
+    def test_model_order_is_normalised_to_the_registry(self) -> None:
+        """並び順の出所はregistryだけ。同じ選択なら常に同じdigestになる。"""
+        registry_order = list(
+            json.loads(REGISTRY.read_text(encoding="utf-8"))["models"]
+        )
+        temporary, path = self.write_profile(
+            {
+                "schema_version": 1,
+                "name": "reversed",
+                "models": list(reversed(registry_order)),
+                "default_model": registry_order[0],
+            }
+        )
+        self.addCleanup(temporary.cleanup)
+        profile = resolve_profile(REGISTRY, path)
+        self.assertEqual(registry_order, list(profile.models))
+        self.assertEqual(registry_order, list(profile.registry))
+
+    def test_apply_payload_only_accepts_the_three_editable_fields(self) -> None:
+        model = "minimax/minimax-m3"
+        accepted = parse_apply_payload(
+            json.dumps({"schema_version": 1, "models": [model], "default_model": model})
+        )
+        resolved = resolve_apply_payload(REGISTRY, accepted, name="keep-me")
+        self.assertEqual("keep-me", resolved.name)
+        self.assertEqual((model,), resolved.models)
+        for rejected in (
+            {"schema_version": 1, "models": [model], "default_model": model, "name": "偽名"},
+            {"schema_version": 1, "models": [model], "default_model": model, "default_effort": "max"},
+            [model],
+        ):
+            with self.subTest(rejected=rejected), self.assertRaises(ProfileError):
+                parse_apply_payload(json.dumps(rejected))
+        with self.assertRaises(ProfileError):
+            parse_apply_payload("{")
 
     def test_duplicate_and_unknown_models_fail(self) -> None:
         for models in (

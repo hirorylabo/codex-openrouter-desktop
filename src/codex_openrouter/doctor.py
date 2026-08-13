@@ -27,7 +27,7 @@ from . import catalog as catalog_module
 from . import configblock
 from .app import UserPaths
 from .auth import CredentialStore
-from .profile import resolve_profile, select_profile_path
+from .profile import installed_profile
 from .supervisor import CATALOG_BLOCK, PROVIDER_BLOCK, State
 
 ENDPOINT = "https://openrouter.ai/api/v1/responses"
@@ -255,6 +255,32 @@ def check_config(
     )
 
 
+def check_manifest(doctor: Doctor, paths: UserPaths, profile) -> None:
+    """install-manifestが導入済みprofileと同じ集合を指していること。
+
+    設定画面のapplyはprofile・state・manifestを1つのtransactionで置き換える。
+    ここがずれているのは、その外で誰かが片方だけ書き換えた合図。
+    """
+    receipt = paths.install_manifest
+    if not receipt.is_file() or receipt.is_symlink():
+        doctor.warn(f"install-manifestがありません: {receipt}")
+        return
+    try:
+        document = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        doctor.fail(f"install-manifestを読み込めません: {exc}")
+        return
+    recorded = document.get("profile_digest") if isinstance(document, dict) else None
+    if recorded is None:
+        doctor.warn("install-manifestにprofile digestがありません。upgradeで記録されます")
+        return
+    doctor.expect(
+        recorded == profile.digest,
+        "install-manifestのprofile digestは導入済みprofileと一致します",
+        "install-manifestと導入済みprofileが一致しません",
+    )
+
+
 def check_catalog(
     doctor: Doctor,
     paths: UserPaths,
@@ -263,7 +289,10 @@ def check_catalog(
 ) -> None:
     path = paths.composite_catalog
     if not path.is_file():
-        doctor.warn(f"compositeカタログはまだありません（初回起動時に生成されます）: {path}")
+        doctor.warn(
+            "compositeカタログはまだありません"
+            f"（初回起動時、またはモデル設定の変更後に再生成されます）: {path}"
+        )
         return
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -417,13 +446,7 @@ def run(
     secret_scan: bool = False,
 ) -> int:
     registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
-    profile_path = select_profile_path(
-        argument=None,
-        source_default=registry_path.parent.parent / "profiles/default.json",
-        installed=paths.installed_profile,
-        legacy=paths.codex_home / "profile.json",
-    )
-    profile = resolve_profile(registry_path, profile_path)
+    _profile_path, profile = installed_profile(registry_path, paths)
     registry_models = profile.registry
     doctor = Doctor()
     check_stock(doctor, paths)
@@ -437,6 +460,7 @@ def run(
         f"導入済みprofile digestは一致します: {profile.name}",
         "supervisor stateと導入済みprofileが一致しません",
     )
+    check_manifest(doctor, paths, profile)
     check_config(doctor, paths, registry_models, set(registry))
     check_catalog(doctor, paths, registry_models, set(registry))
     if runtime:

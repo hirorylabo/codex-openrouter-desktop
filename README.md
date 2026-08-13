@@ -5,7 +5,7 @@
 
 公式の署名済み`/Applications/ChatGPT.app`を**一切変更せず**、`~/.codex/config.toml`のmarker blockとローカルguardだけで、純正appのモデルピッカーにOpenRouterモデルを並べるCLIです。ASARパッチもcloneも作りません。`ChatGPT.app`、ASAR、API key、Cookie、履歴、userData、ログは配布物にもrepositoryにも含みません。
 
-Desktopの`Codex OpenRouter.app`から起動すると、事前処理のうえ純正appが立ち上がり、pickerにnativeとOpenRouterが両方並びます。終了時にcatalogを外すので、`ChatGPT.app`を直接起動したときはvanillaのままです。
+Desktopの`Codex OpenRouter.app`は小型の管理ランチャーです。開くと表示モデル数・既定モデル・workspaceを示す画面が出て、「OpenRouterで起動」を押したときだけ事前処理のうえ純正appが立ち上がり、pickerにnativeとOpenRouterが両方並びます。終了時にcatalogを外すので、`ChatGPT.app`を直接起動したときはvanillaのままです。
 
 [English](./README.en.md)
 
@@ -86,28 +86,51 @@ codex-openrouter setup [--workspace PATH] [--profile default|FILE] [--auth oauth
 codex-openrouter launch [PATH]
 codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter migrate
+codex-openrouter profile show --json
+codex-openrouter profile apply --stdin-json
 codex-openrouter guard-log [--clear]
 codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
 
-セットアップ後は`$HOME/.local/bin`を`PATH`へ追加してください。Desktopの`Codex OpenRouter.app`へfolderをdropして起動することもできます。
+セットアップ後は`$HOME/.local/bin`を`PATH`へ追加してください。
 
 FinderでDesktopの「スタックを使用」がONの場合、launcherは「アプリケーション」stack内へ表示されます。直接見える位置へ置く場合はFinderの`表示 > スタックを使用`をOFFにしてください。launcherはproject固有icon、bundle署名、既定workspaceをsetup/upgradeごとに再生成します。
 
+### 管理ランチャー
+
+`Codex OpenRouter.app`はDockとAppメニューを持つ通常のmacOS appです。常駐はせず、管理画面を閉じるかOpenRouterセッションが終われば一緒に終了します。
+
+- 開くと現在の表示モデル数・既定モデル・使用workspaceが出ます。
+- 主ボタン「OpenRouterで起動」を押すまでChatGPTは起動しません。
+- launcherへfolderをdropすると、そのfolderをworkspaceにした状態で管理画面が開きます。押すまで起動しないのは同じです。
+- 副ボタン「モデル設定…」、Appメニューの「設定…」、`⌘,`のいずれからでもモデル設定画面が開きます。
+
+### モデル設定画面
+
+registry掲載の検証済みモデルをチェックボックスで出し入れし、選択済みモデルから既定モデルを1件指定します。任意slugの登録口はありません。
+
+- 最低1モデルが必須です。既定モデルを外した場合は、新しい既定を明示選択するまで保存できません。
+- 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます。
+- 「検証して保存」はAPI keyの実効model集合との完全一致を確認してから保存します。不一致・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**。
+- 保存に成功すると「次回のOpenRouter起動から反映」と表示します。既定モデルは次の専用起動で一度だけ適用されます。
+- OpenRouterモード稼働中は編集できません（「ChatGPT終了後に変更できます」と表示します）。
+- 画面はAPI keyを取得も表示もしません。検証はPython CLIがKeychainから直接読み、値はUIへ渡りません。
+
 ### 純正appからOpenRouterモードへ切り替える
 
-純正`ChatGPT.app`とOpenRouterモードは、同じapp・userData・`~/.codex/config.toml`を使うため同時起動しません。純正appの起動中に`Codex OpenRouter.app`をクリックすると、通常終了してOpenRouterモードで再起動するか確認します。
+純正`ChatGPT.app`とOpenRouterモードは、同じapp・userData・`~/.codex/config.toml`を使うため同時起動しません。純正appの起動中に管理画面の「OpenRouterで起動」を押すと、通常終了してOpenRouterモードで再起動するか確認します。
 
+- 「OpenRouterで起動」を押した時点で確認し、押すまでは何も変更しません。
 - 「キャンセル」では既存の純正appを前面へ戻し、configやguardを変更しません。
 - 切り替える場合も通常終了だけを要求し、応答しないappを強制終了しません。
 - CLIの`codex-openrouter launch`は確認UIを持たないため、純正appを終了してから実行してください。
 - setup、upgrade、rollback、migrate、launchはユーザー単位で排他され、並行実行した2本目は共有状態を変更する前に停止します。
 
-### クリック起動時の自動更新
+### 起動時の自動更新
 
-リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は`Codex OpenRouter.app`をクリックするたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。
+リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は「OpenRouterで起動」を押すたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。管理画面を開いただけでは更新しません。
 
 自動経路では実課金のAPI往復（`validate_key_and_profile`）を行いません。失敗しても起動は止まらず、`atomic_promote`のverifyが落ちれば直前の状態へ自動rollbackします。同じ内容で一度失敗したら、内容が変わるまで再試行しません。
 
@@ -128,7 +151,17 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 
 API keyから見えるconcrete model集合がprofileと完全一致しない場合、導入を停止します。
 
-正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。通常upgradeとクリック時の自動upgradeはこのprofileを維持します。明示的な`upgrade --profile default|FILE`だけが置き換え、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
+正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。並び順の出所はregistryだけで、profile側の記述順やUIの操作順は結果に影響しません。通常upgradeと起動時の自動upgradeはこのprofileを維持します。置き換えるのは明示的な`upgrade --profile default|FILE`とモデル設定画面の保存だけで、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
+
+モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、この2つを呼ぶだけです。
+
+```bash
+codex-openrouter profile show --json
+printf '%s' '{"schema_version":1,"models":["minimax/minimax-m3"],"default_model":"minimax/minimax-m3"}' \
+  | codex-openrouter profile apply --stdin-json
+```
+
+applyが受け付けるのは`schema_version`・`models`・`default_model`だけです。表示名・reasoning effort・並び順は変更できません。lifecycle lock内でregistry整合性とAPI keyの実効model集合を検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。検証に落ちれば全対象が元へ戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
 
 ## 更新と移行
 
@@ -176,6 +209,7 @@ codex-openrouter auth logout
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src portable scripts
 PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
+xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
 python3 scripts/secret_scan.py --tree .
 python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```
