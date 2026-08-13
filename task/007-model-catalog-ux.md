@@ -182,5 +182,32 @@ scripts/macos_installed_e2e.zsh
 
 ## Status
 
-着手前。PR #2（`codex/model-settings-launcher`）の上に積むstacked branch
-`codex/model-catalog-ux` で実装する。
+実装完了。stacked branch `codex/model-catalog-ux`（PR #2 の `codex/model-settings-launcher` の上）。
+
+通したもの: unittest 246件（新規37件）、compileall、synthetic E2E、secret scan（tree + archive）、
+release build、`swiftc portable/launcher/app/*.swift`、`zsh -n` 3本 + 埋め込みpythonブロックの
+構文検査、隔離state_dirでのライブ取得。
+
+### 実データで確認したこと
+
+ライブ取得は0.5秒・候補328件（ZDR 175 / free 14 / reasoning 116）。cacheは347KBを0600で書き、
+2回目は3ms。cacheに秘密値は入らない。
+
+### 計画から変えた点
+
+- **`zdr_supported` は「稼働ZDR endpointがあるか」で決める。** 当初は最安ZDR価格が引けるかで
+  判定していたが、cache価格を公開しないproviderが80 modelあり、それらが「ZDRなし」と誤判定されて
+  guardのZDR強制が外れていた。価格の欠損と能力の有無を分離した。
+- **利用量の窓はpayloadの最新日を起点にする。** 今日を起点にすると、datasetが遅延した日だけ
+  1dが黙って0になる。
+- **VERSIONは0.2.0のまま。** v0.2.0は未リリース（tagはv0.1.1まで）なので、v0.3.0を立てずに
+  v0.2.0のリリースノートへ畳んだ。
+
+### 未実施・未検証
+
+- **rankings の join は未検証。** `model_permaslug` ↔ `canonical_slug` の対応は形式が一致する
+  だけで、実データでの突き合わせはAPI keyが要るため行っていない。`usage_matched` が0のままなら
+  joinが壊れていると分かるようにしてある。設定画面を1回開けば確認できる。
+- `scripts/macos_installed_e2e.zsh` の launcher 2 cycle と、目視項目11件。ChatGPTの通常終了を
+  含む対話操作なので利用者が実行する。
+- 実際に非ZDRモデルを足してOpenRouterへ疎通させる確認。

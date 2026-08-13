@@ -272,6 +272,12 @@ def entry_for(row: dict, curated: dict | None = None) -> dict[str, Any]:
 
     `capability` と `reasoning_note` だけはAPIから導出しきれない（英語の
     `description` しか無い）。同梱5件の日本語はここで温存する。
+
+    `fallback_headline` はオフライン時に使うsnapshotであって、ライブ値と一致し
+    続ける保証は無い。OpenRouterのheadline価格は既定endpointの入れ替わりで動く
+    （実測で `z-ai/glm-5.2` が1時間のうちに 0.5/3.15 → 0.63/1.98 へ変わった）。
+    だから導出規則の回帰テストはfixtureに対して行う。ライブと突き合わせると
+    価格の揺れで落ちてしまい、規則の壊れと区別が付かない。
     """
     entry: dict[str, Any] = {
         "display_name": row["display_name"],

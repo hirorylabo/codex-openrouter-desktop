@@ -36,7 +36,9 @@ cd codex-openrouter-desktop-v0.2.0
 
 ## OpenRouter preparation
 
-Install the official signed ChatGPT.app, Xcode Command Line Tools, and Python 3.11+. (The Node.js dependency was removed in v0.2.0.) In OpenRouter, disable prompt training, public free endpoints, and the 1% data discount; enable Non-frontier ZDR; create a Guardrail whose exact model allowlist matches the selected profile; assign it to the OAuth-created key; and set a spend limit.
+Install the official signed ChatGPT.app, Xcode Command Line Tools, and Python 3.11+. (The Node.js dependency was removed in v0.2.0.) In OpenRouter, disable prompt training, public free endpoints, and the 1% data discount; enable Non-frontier ZDR; and **set a spend limit on the key**.
+
+A Guardrail is optional as of v0.2.0. Earlier versions required an exact model allowlist and validated that the key's effective model set matched the profile *exactly*, which meant editing the Guardrail every time you added a model. Validation now only checks that the selected models are callable with the key, so the picker still never offers a model that cannot be called, and retired or renamed models are still detected. What is given up is the cap on which models a leaked key could bill; the spend limit takes over that role.
 
 ## Setup
 
@@ -55,11 +57,15 @@ When Finder's desktop stacks are enabled, the launcher appears inside the Applic
 
 The launcher is a regular macOS app with a Dock icon and an application menu, but it never becomes a resident daemon: it quits when its window closes or the OpenRouter session ends. Dropping a folder on it only changes the workspace shown in the panel; nothing starts until you press the primary button.
 
-The settings screen opens from the panel, the application menu, or `⌘,`. It lists the verified models from the bundled registry as checkboxes and lets you pick one default among the selected ones. There is no entry point for arbitrary slugs.
+The settings screen opens from the panel, the application menu, or `⌘,`. It lists the models OpenRouter actually serves and lets you pick one default among the selected ones. There is no entry point for arbitrary slugs. Only tool-calling models are offered, since Codex requires them.
+
+Columns show price (IN/OUT per 1M tokens), release date, 7-day token usage, and badges. Sort by release date, usage, input price, output price, or name; filter by name, `ZDRのみ` (on by default), `学習なしのみ`, `無料のみ`, and `reasoningのみ`. Selected models are pinned to the top and are never hidden by a filter.
+
+Usage is **token volume, not connection count** — that is all OpenRouter publishes, and only for the top 50 models per day. Anything outside that shows `—` rather than zero.
 
 - At least one model is required. Removing the current default disables saving until a new default is chosen explicitly.
-- **OpenRouter Guardrailを開く** opens the Guardrail settings page.
-- **検証して保存** requires the API key's effective concrete model set to match the selection exactly. A mismatch, a network failure, or a Keychain failure changes nothing on disk.
+- **OpenRouter Guardrailを開く** opens the Guardrail settings page (optional).
+- **検証して保存** requires every selected model to be callable with the API key. An uncallable model, a network failure, or a Keychain failure changes nothing on disk.
 - A successful save reports that the change takes effect on the next OpenRouter launch, where the new default model is applied exactly once.
 - Editing is disabled while OpenRouter mode is running.
 - The screen never reads or displays the API key. Validation happens in the Python CLI, which reads the Keychain directly.
@@ -83,15 +89,18 @@ codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter migrate
 codex-openrouter profile show --json
 codex-openrouter profile apply --stdin-json
+codex-openrouter models list --json [--refresh]
 codex-openrouter guard-log [--clear]
 codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
 codex-openrouter auth login|rotate|logout
 ```
 
-Custom profiles may only select models already present in [`models/registry.json`](./models/registry.json). Before any application write, the CLI requires the API key's effective concrete model set to exactly match the profile. The normalized installed profile drives the picker, guard, watcher, and doctor, and its model order always comes from the registry. A normal or automatic upgrade preserves it; an explicit `upgrade --profile ...` and the settings screen replace it. A changed profile applies its default model once on the next dedicated launch.
+Custom profiles may only select models present in the active registry — the bundled [`models/registry.json`](./models/registry.json), or the installed registry that grows as you add models from the live catalog. Before any application write, the CLI requires every selected model to be callable with the API key. The normalized installed profile drives the picker, guard, watcher, and doctor, and its model order always comes from the registry. A normal or automatic upgrade preserves it; an explicit `upgrade --profile ...` and the settings screen replace it. A changed profile applies its default model once on the next dedicated launch.
 
-`profile show --json` and `profile apply --stdin-json` are the only update path the launcher uses; the Swift side duplicates no profile, Keychain, or Guardrail logic. `apply` accepts only `schema_version`, `models`, and `default_model`, and replaces the profile, supervisor state, install manifest, and stale catalogs in a single transaction under the lifecycle lock. Re-saving an identical selection is a no-op that does not re-arm the default model.
+`profile show --json`, `models list --json`, and `profile apply --stdin-json` are the only update path the launcher uses; the Swift side duplicates no profile, Keychain, or Guardrail logic. `profile show` never touches the network; `models list` fetches the live OpenRouter catalog and caches it for a day. `apply` accepts only `schema_version`, `models`, and `default_model`, and replaces the profile, supervisor state, install manifest, installed registry, and stale catalogs in a single transaction under the lifecycle lock. Re-saving an identical selection is a no-op that does not re-arm the default model.
+
+ZDR enforcement is per model. Models with a live ZDR endpoint still get `provider.zdr` forced; models without one do not, because forcing it there guarantees failure. Adding a non-ZDR model requires an explicit confirmation, is shown permanently in the launcher panel, and is reported by `doctor --network` on every run.
 
 After downloading a newer release or updating a source checkout, close ChatGPT.app and run the repository's `./codex-openrouter upgrade`. Runtime files, the launcher, manifest, installed profile, and supervisor state are staged and promoted transactionally. Verification failure restores every promoted target. `codex-openrouter rollback` restores the previous promoted set.
 

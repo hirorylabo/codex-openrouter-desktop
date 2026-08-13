@@ -16,23 +16,46 @@ Codexは週2回以上更新され、そのたびにsemantic anchorの再解析�
 
 `Codex OpenRouter.app` は小型の管理ランチャーになりました。開くと表示モデル数・既定モデル・使用workspaceが出て、**「OpenRouterで起動」を押すまでChatGPTは起動しません**。folderをdropした場合もworkspaceが変わるだけです。DockとAppメニューを持つ通常のmacOS appですが常駐はせず、画面を閉じるかOpenRouterセッションが終われば一緒に終了します。
 
-「モデル設定…」・Appメニューの「設定…」・`⌘,` から、pickerへ出す検証済みモデルをチェックボックスで出し入れできます。任意slugの登録口は作っていません。純正pickerに「カスタム…」のような偽の行も足しません。
+「モデル設定…」・Appメニューの「設定…」・`⌘,` から、OpenRouterが配信しているモデルの一覧を開けます。任意slugの登録口は作っていません。純正pickerに「カスタム…」のような偽の行も足しません。
+
+一覧はtool calling対応モデルだけを候補にし、価格（IN/OUT $/M）・公開日・7dトークン利用量・バッジを列で出します。公開日／利用量／入力価格／出力価格／名前で並べ替え、検索と`ZDRのみ`（既定ON）・`学習なしのみ`・`無料のみ`・`reasoningのみ`で絞り込めます。選択済みは常に先頭へ固定され、絞り込みでも消えません。
+
+利用量は**接続数ではなくトークン総数**です。OpenRouterが公開しているのがそれだけで、しかも日次トップ50モデルに限られます。圏外は`—`と表示します（0ではありません）。
 
 - 最低1モデルが必須です。既定モデルを外したら、新しい既定を明示選択するまで保存できません
-- 「検証して保存」はAPI keyの実効model集合との完全一致を確認します。不一致・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**
+- 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認します。呼び出せないmodelがある・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**
 - 保存に成功すると「次回のOpenRouter起動から反映」と表示し、次の専用起動で既定モデルを一度だけ適用します
 - OpenRouterモード稼働中は編集できません
 - 画面はAPI keyを取得も表示もしません
 
-Swift側にprofile・Keychain・Guardrailの判断は置いていません。更新窓口はCLIの2コマンドだけです。
+Swift側にprofile・Keychain・Guardrailの判断は置いていません。更新窓口はCLIの3コマンドだけです。
 
 ```bash
 codex-openrouter profile show --json
+codex-openrouter models list --json
 printf '%s' '{"schema_version":1,"models":["minimax/minimax-m3"],"default_model":"minimax/minimax-m3"}' \
   | codex-openrouter profile apply --stdin-json
 ```
 
-applyはlifecycle lock内で registry整合性 → Keychain → OpenRouterの実効model集合 の順に検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。promotion後の検証に落ちれば全対象が一括で戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
+applyはlifecycle lock内で registry整合性 → Keychain → 選択modelの呼び出し可否 の順に検証し、profile・supervisor state・install-manifest・導入済みregistry・旧catalogを単一transactionで置き換えます。promotion後の検証に落ちれば全対象が一括で戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
+
+## Guardrailを任意にしました
+
+以前はOpenRouter Guardrailにexact allowlistを組み、API keyの実効model集合とprofileの**完全一致**を要求していました。モデルを足すたびにGuardrailの編集が要るため、追加体験を悪くしていました。
+
+検証するのは「選択中のmodelがこのkeyで呼べるか」だけになりました。pickerに出るmodelが必ず呼べることは変わらず、model引退・rename・制限付きkeyも今までどおり検出します。失うのは「鍵が漏れても課金は選択中のmodelまで」という上限で、**spend limitがその役割を引き継ぎます**。Guardrailを併用しても動作します。
+
+## ZDR強制をモデル単位にしました
+
+guardは全リクエストへ無条件に `provider.zdr` を立てていました。ZDR稼働endpointを持たないモデルではこれが必ず失敗を招くため、実測でOpenRouterの無料モデル15件は**1件も呼び出せない**状態でした。
+
+registryの `zdr_supported` を見て、ZDRで動くモデルにだけ立てるようにしました。ZDRなしのモデルを追加するときは確認シートが出て、追加後は管理画面に橙色で常時表示し、`doctor --network` が毎回WARNで報告し、純正pickerの説明文にも「ZDRなし」と入ります。**他のモデルのZDR強制は外れません。**
+
+## そのほか
+
+- 同梱registryのfallback価格が陳腐化していたため実測値へ更新しました（`deepseek-v4-pro` は 0.435→1.168、`z-ai/glm-5.2` は 0.07→0.50）
+- 参照されていなかった `negative_model` 設定を削除しました
+- cache価格やZDR価格を公開しないモデルを1件選んだだけで、**全モデルの価格がfallbackへ落ちる**不具合を直しました
 
 ## 起動時の自動更新
 
