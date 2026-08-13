@@ -163,29 +163,39 @@ def training_providers(payload: Any) -> set[str]:
     return {name for name in names if isinstance(name, str)}
 
 
-def usage_index(payload: Any, windows: list[int], today: date) -> dict[str, dict[str, str]]:
+def usage_index(payload: Any, windows: list[int]) -> dict[str, dict[str, str]]:
     """rankings-dailyを `canonical_slug -> {"7d": "...", ...}` へ畳む。
 
     join keyは `model_permaslug`。modelsの `canonical_slug` と同じ形式なので
     そこで突き合わせる。合致しなかった行は捨てる（呼び出し側が件数を見る）。
+
+    窓の起点は**payloadの最新日**であって今日ではない。この dataset は
+    「直近の完了済みUTC日」までしか無く、遅延もする。今日を起点にすると、
+    遅れた日だけ 1d が黙って0になる。
     """
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
         raise CatalogError("rankings APIにdata配列がありません")
-    totals: dict[str, dict[int, int]] = {}
+
+    rows: list[tuple[str, date, int]] = []
     for row in data:
         if not isinstance(row, dict):
             continue
         slug, day, tokens = row.get("model_permaslug"), row.get("date"), row.get("total_tokens")
+        # `other` は上位50件圏外の合計行で、特定modelの利用量ではない。
         if not isinstance(slug, str) or slug == "other" or not isinstance(day, str):
             continue
         try:
-            age = (today - date.fromisoformat(day)).days
-            amount = int(tokens)
+            rows.append((slug, date.fromisoformat(day), int(tokens)))
         except (ValueError, TypeError):
             continue
-        if age < 0:
-            continue
+    if not rows:
+        return {}
+
+    anchor = max(day for _slug, day, _amount in rows)
+    totals: dict[str, dict[int, int]] = {}
+    for slug, day, amount in rows:
+        age = (anchor - day).days
         bucket = totals.setdefault(slug, dict.fromkeys(windows, 0))
         for window in windows:
             if age < window:
@@ -292,7 +302,6 @@ def build(
     zdr_document: Any,
     providers_document: Any = None,
     rankings_document: Any = None,
-    today: date | None = None,
 ) -> dict[str, Any]:
     """取得済みの生documentから候補一覧を作る。ここはネットワークに触らない。"""
     settings = contract(registry)
@@ -309,9 +318,7 @@ def build(
     usage: dict[str, dict[str, str]] = {}
     if rankings_document is not None:
         try:
-            usage = usage_index(
-                rankings_document, list(settings["usage_windows"]), today or date.today()
-            )
+            usage = usage_index(rankings_document, list(settings["usage_windows"]))
         except CatalogError:
             usage = {}
 
@@ -389,7 +396,6 @@ def fetch(registry: dict, *, key: str | None = None, today: date | None = None) 
         zdr_document=zdr_document,
         providers_document=providers_document,
         rankings_document=rankings_document,
-        today=today,
     )
     document["fetched_at"] = round(time.time(), 3)
     return document

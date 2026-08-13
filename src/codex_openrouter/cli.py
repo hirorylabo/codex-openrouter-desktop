@@ -342,6 +342,28 @@ def profile_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def models_command(args: argparse.Namespace) -> int:
+    """設定画面へ出す候補一覧。秘密値は含まない。
+
+    利用量は「接続数」ではなく**トークン総数**。OpenRouterが公開しているのが
+    それだけで、しかも日次トップ50に限られる。圏外のmodelは値を持たない。
+    """
+    from . import modelcatalog
+
+    paths = UserPaths.current()
+    registry = json.loads((root() / "models/registry.json").read_text(encoding="utf-8"))
+
+    key = None
+    try:
+        key = CredentialStore(paths.credential_helper).get()
+    except Exception:  # noqa: BLE001 - 鍵が無くても候補一覧は出す
+        key = None
+
+    document = modelcatalog.load(paths, registry, key=key, refresh=args.refresh)
+    print(json.dumps(document, ensure_ascii=False, indent=2))
+    return 0
+
+
 def guard_log_command(args: argparse.Namespace) -> int:
     """guardが弾いたmodelを集計する（巻き込みスキャン）。
 
@@ -440,6 +462,13 @@ def build_parser() -> argparse.ArgumentParser:
     profile_apply.add_argument("--stdin-json", action="store_true", required=True)
     profile_apply.set_defaults(func=profile_command)
 
+    models_parser = subcommands.add_parser("models")
+    models_actions = models_parser.add_subparsers(dest="models_action", required=True)
+    models_list = models_actions.add_parser("list")
+    models_list.add_argument("--json", action="store_true", required=True)
+    models_list.add_argument("--refresh", action="store_true")
+    models_list.set_defaults(func=models_command)
+
     guard_log = subcommands.add_parser("guard-log")
     guard_log.add_argument("--clear", action="store_true")
     guard_log.set_defaults(func=guard_log_command)
@@ -470,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     from .install import InstallError
     from .lifecycle import LifecycleLockError
+    from .modelcatalog import CatalogError
     from .promotion import PromotionError
     from .settings import SettingsError
     from .supervisor import SupervisorError
@@ -481,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         AppError,
         AuthenticationError,
+        CatalogError,
         configblock.ConfigBlockError,
         InstallError,
         LifecycleLockError,
