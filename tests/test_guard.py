@@ -161,6 +161,50 @@ class ZdrTests(GuardTestCase):
         self.assertIs(body["provider"]["zdr"], True)
         self.assertIs(body["provider"]["allow_fallbacks"], False)
 
+    def test_zdr_is_forced_for_every_model_when_not_told_otherwise(self):
+        """既定は安全側。registryが何も言わないなら全modelへ強制する。"""
+        for model in sorted(ALLOWED):
+            with self.subTest(model=model):
+                self.forwarder.calls.clear()
+                self.post({"model": model, "input": "hi"})
+                body = json.loads(self.forwarder.calls[0][0])
+                self.assertIs(body["provider"]["zdr"], True)
+
+
+class PerModelZdrTests(GuardTestCase):
+    """ZDR endpointを持たないmodelへZDRを強制すると必ず失敗する。
+
+    利用者がそのmodelを明示的に選んだ場合だけ、そのmodelに限って外す。
+    他のmodelの強制は外れてはいけない。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.guard.zdr = frozenset({"deepseek/deepseek-v4-pro"})
+
+    def test_zdr_model_still_gets_it_forced(self):
+        self.post({"model": "deepseek/deepseek-v4-pro", "input": "hi"})
+        body = json.loads(self.forwarder.calls[0][0])
+        self.assertIs(body["provider"]["zdr"], True)
+
+    def test_non_zdr_model_is_forwarded_untouched(self):
+        self.post({"model": "z-ai/glm-5.2", "input": "hi"})
+        body = json.loads(self.forwarder.calls[0][0])
+        self.assertNotIn("provider", body)
+
+    def test_non_zdr_model_keeps_the_callers_own_provider_settings(self):
+        self.post(
+            {"model": "z-ai/glm-5.2", "input": "hi", "provider": {"allow_fallbacks": False}}
+        )
+        body = json.loads(self.forwarder.calls[0][0])
+        self.assertIs(body["provider"]["allow_fallbacks"], False)
+        self.assertNotIn("zdr", body["provider"])
+
+    def test_a_model_outside_the_allowlist_never_reaches_prepare(self):
+        status, _ = self.post({"model": COLLATERAL, "input": "must-not-be-read"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.forwarder.calls, [])
+
 
 class FailureTests(GuardTestCase):
     def test_credential_failure_does_not_forward(self):

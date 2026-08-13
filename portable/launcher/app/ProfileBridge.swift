@@ -19,6 +19,10 @@ enum ProfileBridge {
         let capability: String
         let efforts: [String]
         let defaultEffort: String?
+        let contextWindow: Int?
+        /// 省略時は安全側のtrue。非必須で読むのは、古いCLIと新しいランチャーが
+        /// 一瞬でも噛み合ったときに、画面ごと「応答を解釈できません」で潰さないため。
+        let zdrSupported: Bool?
     }
 
     struct Selection: Decodable {
@@ -43,6 +47,36 @@ enum ProfileBridge {
         let profile: Selection
     }
 
+    /// `models list --json` の1行。候補一覧の描画に必要な事実だけを持つ。
+    struct CatalogEntry: Decodable {
+        struct Price: Decodable {
+            let input: String
+            let output: String
+            let cacheRead: String?
+        }
+
+        let id: String
+        let displayName: String
+        let description: String
+        let created: Double?
+        let contextWindow: Int?
+        let efforts: [String]
+        let defaultEffort: String?
+        let zdrSupported: Bool
+        /// nilは「不明」。学習ポリシーはprovider単位でしか公開されておらず、
+        /// ZDR endpointを持たないmodelについては断定できない。
+        let trainsOnData: Bool?
+        let free: Bool
+        let headline: Price
+        let usageTokens: [String: String]?
+    }
+
+    struct Catalog: Decodable {
+        let schemaVersion: Int
+        let models: [CatalogEntry]
+        let usageAvailable: Bool
+    }
+
     static var executable: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/codex-openrouter")
@@ -52,6 +86,17 @@ enum ProfileBridge {
         let snapshot: Snapshot = try decode(run(["profile", "show", "--json"], input: nil))
         try assertSupported(snapshot.schemaVersion)
         return snapshot
+    }
+
+    /// 候補一覧。`show` と違いネットワークを触りうるので、UIは別途非同期で呼ぶ。
+    static func catalog(refresh: Bool = false) throws -> Catalog {
+        var arguments = ["models", "list", "--json"]
+        if refresh {
+            arguments.append("--refresh")
+        }
+        let catalog: Catalog = try decode(run(arguments, input: nil))
+        try assertSupported(catalog.schemaVersion)
+        return catalog
     }
 
     static func apply(models: [String], defaultModel: String) throws -> Outcome {

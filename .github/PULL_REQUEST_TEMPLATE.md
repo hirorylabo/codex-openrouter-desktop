@@ -17,4 +17,6 @@
 - [ ] `scripts/macos_installed_e2e.zsh`（導入済みlauncherを2 cycle）
 - [ ] 純正ChatGPT.appの署名有効・patch marker無し（`codex-openrouter doctor`）
 - [ ] pickerに出るOpenRouterモデルが導入済みprofileと一致
+- [ ] `codex-openrouter models list --json`（候補・価格・ZDR判定）
+- [ ] ZDRなしモデルを足した場合、確認シート・管理画面の警告・doctorのWARNが出る
 - [ ] 秘密値がUI・config・catalog・guard logに出ない

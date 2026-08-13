@@ -85,6 +85,19 @@ class UserPaths:
     def install_manifest(self) -> Path:
         return self.state_dir / "install-manifest.json"
 
+    @property
+    def installed_registry(self) -> Path:
+        """設定画面がmodelを足すたびに育つregistry。無ければ同梱registryを使う。"""
+        return self.state_dir / "registry.json"
+
+    @property
+    def catalog_cache(self) -> Path:
+        return self.state_dir / "model-catalog-cache.json"
+
+    @property
+    def catalog_cache_state(self) -> Path:
+        return self.state_dir / "model-catalog-state.json"
+
 
 def write_json(path: Path, document: dict) -> None:
     """runtime stateのJSONを0600で書く。中身は秘密値を含まない前提。"""

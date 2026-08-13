@@ -113,21 +113,21 @@ class StateTests(unittest.TestCase):
         self.state = Path(self.directory.name) / "price-state.json"
 
     def test_first_run_fetches(self):
-        self.assertTrue(pricing.should_fetch(REGISTRY, self.state))
+        self.assertTrue(pricing.should_fetch(REGISTRY["price_refresh"], self.state))
 
     def test_success_is_cached_for_the_ttl(self):
-        pricing._write_state(self.state, "success", time.time())
-        self.assertFalse(pricing.should_fetch(REGISTRY, self.state))
+        pricing.write_refresh_state(self.state, "success", time.time())
+        self.assertFalse(pricing.should_fetch(REGISTRY["price_refresh"], self.state))
         old = time.time() - REGISTRY["price_refresh"]["success_ttl_seconds"] - 1
-        pricing._write_state(self.state, "success", old)
-        self.assertTrue(pricing.should_fetch(REGISTRY, self.state))
+        pricing.write_refresh_state(self.state, "success", old)
+        self.assertTrue(pricing.should_fetch(REGISTRY["price_refresh"], self.state))
 
     def test_failure_uses_the_shorter_backoff(self):
-        pricing._write_state(self.state, "failure", time.time())
-        self.assertFalse(pricing.should_fetch(REGISTRY, self.state))
+        pricing.write_refresh_state(self.state, "failure", time.time())
+        self.assertFalse(pricing.should_fetch(REGISTRY["price_refresh"], self.state))
         old = time.time() - REGISTRY["price_refresh"]["failure_backoff_seconds"] - 1
-        pricing._write_state(self.state, "failure", old)
-        self.assertTrue(pricing.should_fetch(REGISTRY, self.state))
+        pricing.write_refresh_state(self.state, "failure", old)
+        self.assertTrue(pricing.should_fetch(REGISTRY["price_refresh"], self.state))
 
     def test_resolve_records_failure(self):
         with mock.patch.object(pricing, "fetch_json",

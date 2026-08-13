@@ -121,12 +121,14 @@ def parse_apply_payload(raw: str) -> dict[str, Any]:
     return document
 
 
-def resolve_apply_payload(
-    registry_path: Path, payload: dict[str, Any], *, name: str
+def resolve_apply_document(
+    registry_document: dict[str, Any], payload: dict[str, Any], *, name: str
 ) -> ResolvedProfile:
-    """apply入力をinstalled registryへ突き合わせて解決する。
+    """apply入力をregistry documentへ突き合わせて解決する。
 
     profile nameは既存のものを引き継ぐ。UIはモデル集合と既定モデルだけを決める。
+    documentを受け取るのは、model追加時にまだ書き出していないregistryへ
+    突き合わせる必要があるため（書いてから検証すると、落ちたときに戻す対象が増える）。
     """
     document = {
         "schema_version": payload.get("schema_version"),
@@ -134,7 +136,13 @@ def resolve_apply_payload(
         "models": payload.get("models"),
         "default_model": payload.get("default_model"),
     }
-    return _resolve(_load_json(registry_path), document, name)
+    return _resolve(registry_document, document, name)
+
+
+def resolve_apply_payload(
+    registry_path: Path, payload: dict[str, Any], *, name: str
+) -> ResolvedProfile:
+    return resolve_apply_document(_load_json(registry_path), payload, name=name)
 
 
 def select_profile_path(
@@ -158,14 +166,29 @@ def select_profile_path(
     return path
 
 
+def active_registry(source_registry: Path, paths: "UserPaths") -> Path:
+    """いま正本として使うregistry。
+
+    設定画面でmodelを足すと、選択分を実体化した registry が state_dir へ書かれる。
+    それがあるならそちら、無ければ同梱registry。profileと同じく「導入済みが
+    あれば維持する」規則に揃える。picker・guard・watcher・doctor・設定画面が
+    全て同じ判断をするよう、選択規則はここ1箇所にする。
+    """
+    installed = paths.installed_registry
+    if installed.is_file() and not installed.is_symlink():
+        return installed
+    return source_registry
+
+
 def installed_profile(
     registry_path: Path, paths: "UserPaths", *, argument: str | None = None
 ) -> tuple[Path, ResolvedProfile]:
     """picker・guard・watcher・doctor・設定画面が共有するprofile選択規則。
 
-    fallbackはregistryの隣の `profiles/default.json` に固定する。registryと
-    profileは常に同じツリーから来るので、どちらか片方だけ別のツリーを指す
-    組み合わせは存在しない。
+    `registry_path` は**同梱**registryを指す。profileのfallbackは常にその隣の
+    `profiles/default.json` に固定する。一方、突き合わせるregistry自体は
+    導入済みがあればそちらを使う。この2つを別々に解決するのは、導入済み
+    registryが `state_dir` にあり、その隣にprofileの正本が無いため。
     """
     selected = select_profile_path(
         argument=argument,
@@ -173,4 +196,4 @@ def installed_profile(
         installed=paths.installed_profile,
         legacy=paths.codex_home / "profile.json",
     )
-    return selected, resolve_profile(registry_path, selected)
+    return selected, resolve_profile(active_registry(registry_path, paths), selected)

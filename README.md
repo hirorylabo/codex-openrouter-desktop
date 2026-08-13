@@ -44,9 +44,18 @@ sourceから使う場合も、Release archiveと同じallowlistを推奨しま�
 3. OpenRouterで次を設定します。
    - PrivacyでPrompt TrainingをOFFにし、無料公開endpointと1% data discountを使用しない。
    - Non-frontier ZDRをONにする。
-   - Guardrailを作成し、使用profileのmodel IDだけをexact allowlistへ入れる。
-   - OAuthで作成される最新の`codex-openrouter-desktop` keyへGuardrailを割り当てる。
-   - API keyにspend limitを設定する。未設定はCLIが警告します。
+   - **API keyにspend limitを設定する。** 未設定はCLIが警告します。
+   - （任意）Guardrailで使用modelを絞る。v0.2.0からは必須ではありません。
+
+> **Guardrailを必須にしなくなった経緯**
+> 以前はGuardrailにexact allowlistを組み、API keyの実効model集合とprofileの
+> **完全一致**を要求していました。モデル追加のたびにGuardrailを編集する必要があり、
+> 追加体験を悪くしていたためやめました。
+>
+> いま検証するのは「選択中のmodelがこのkeyで呼べるか」だけです。pickerに出る
+> modelが必ず呼べることは変わらず、model引退・rename・制限付きkeyも今までどおり
+> 検出します。失うのは「鍵が漏れても課金は選択中のmodelまで」という上限で、
+> **spend limitがその役割を引き継ぎます**。Guardrailを併用しても動作します。
 
 既定profileのmodelは次の5件です。
 
@@ -88,6 +97,7 @@ codex-openrouter doctor [--network] [--runtime] [--secret-scan]
 codex-openrouter migrate
 codex-openrouter profile show --json
 codex-openrouter profile apply --stdin-json
+codex-openrouter models list --json [--refresh]
 codex-openrouter guard-log [--clear]
 codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
@@ -109,14 +119,33 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 
 ### モデル設定画面
 
-registry掲載の検証済みモデルをチェックボックスで出し入れし、選択済みモデルから既定モデルを1件指定します。任意slugの登録口はありません。
+OpenRouterが配信しているモデルの一覧から選びます。任意slugの入力口はありません。
+
+一覧はtool callingに対応したモデルだけを候補にします（Codexはtool callingが前提のため）。列は価格（IN/OUT $/M）・公開日・7dトークン利用量・バッジで、次の並び替えと絞り込みができます。
+
+- 並び替え: 公開日が新しい順 / 7dトークン利用量が多い順 / 入力価格が安い順 / 出力価格が安い順 / 名前順
+- 絞り込み: モデル名検索、`ZDRのみ`（既定ON）、`学習なしのみ`、`無料のみ`、`reasoningのみ`
+- 選択済みは常に先頭へ固定され、絞り込みでも消えません。
+
+**トークン利用量について。** OpenRouterが公開しているのは接続数ではなく**トークン総数**で、しかも日次トップ50モデルに限られます。圏外のモデルは`—`と表示します（0ではありません）。取得には`/api/v1/datasets/rankings-daily`を使い、1日1回だけ取得してキャッシュします。
 
 - 最低1モデルが必須です。既定モデルを外した場合は、新しい既定を明示選択するまで保存できません。
-- 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます。
-- 「検証して保存」はAPI keyの実効model集合との完全一致を確認してから保存します。不一致・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**。
+- 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます（任意）。
+- 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認してから保存します。呼び出せないmodelがある・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**。
 - 保存に成功すると「次回のOpenRouter起動から反映」と表示します。既定モデルは次の専用起動で一度だけ適用されます。
 - OpenRouterモード稼働中は編集できません（「ChatGPT終了後に変更できます」と表示します）。
 - 画面はAPI keyを取得も表示もしません。検証はPython CLIがKeychainから直接読み、値はUIへ渡りません。
+
+#### ZDRなしのモデルを追加する場合
+
+ZDR強制はモデル単位です。ZDR稼働endpointを持つモデルには従来どおり`provider.zdr`を強制し、持たないモデルには立てません。以前は全リクエストへ無条件に立てていたため、ZDR endpointのないモデル（無料モデルを含む）は**1件も呼び出せませんでした**。
+
+ZDRなしのモデルを選ぶと確認シートが出ます。追加した場合は次のとおりです。
+
+- 管理画面に「ZDRなしのモデルを N件使用中です」と橙色で常時表示します。
+- `codex-openrouter doctor --network`が毎回WARNで報告します。
+- 純正pickerの説明文にも「ZDRなし（送信内容がproviderに保持される可能性あり）」と入ります。
+- **他のモデルのZDR強制は外れません。**
 
 ### 純正appからOpenRouterモードへ切り替える
 
@@ -138,7 +167,7 @@ registry掲載の検証済みモデルをチェックボックスで出し入れ
 
 ## Profile
 
-[`models/registry.json`](./models/registry.json)は、Codex metadataと実通信を検証したmodelだけを保持します。[`profiles/default.json`](./profiles/default.json)は表示model集合と既定modelを指定します。custom profileではregistry掲載modelの増減だけが可能で、任意slugは拒否されます。
+[`models/registry.json`](./models/registry.json)は同梱の初期registryです。設定画面でmodelを足すと、選択分を実体化した導入済みregistryが`~/.local/share/codex-openrouter-desktop/state/registry.json`へ書かれ、以降はそちらが正本になります。[`profiles/default.json`](./profiles/default.json)は表示model集合と既定modelを指定します。custom profileでは正本registry掲載modelの増減だけが可能で、任意slugは拒否されます。
 
 ```json
 {
@@ -149,19 +178,24 @@ registry掲載の検証済みモデルをチェックボックスで出し入れ
 }
 ```
 
-API keyから見えるconcrete model集合がprofileと完全一致しない場合、導入を停止します。
+選択中のmodelがAPI keyで呼び出せない場合、導入を停止します。keyが余分なmodelを見せていることは問題にしません（Guardrailは任意）。
 
 正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。並び順の出所はregistryだけで、profile側の記述順やUIの操作順は結果に影響しません。通常upgradeと起動時の自動upgradeはこのprofileを維持します。置き換えるのは明示的な`upgrade --profile default|FILE`とモデル設定画面の保存だけで、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
 
-モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、この2つを呼ぶだけです。
+モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、次の3つを呼ぶだけです。
 
 ```bash
 codex-openrouter profile show --json
+codex-openrouter models list --json
 printf '%s' '{"schema_version":1,"models":["minimax/minimax-m3"],"default_model":"minimax/minimax-m3"}' \
   | codex-openrouter profile apply --stdin-json
 ```
 
-applyが受け付けるのは`schema_version`・`models`・`default_model`だけです。表示名・reasoning effort・並び順は変更できません。lifecycle lock内でregistry整合性とAPI keyの実効model集合を検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。検証に落ちれば全対象が元へ戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
+`profile show`はネットワークに触らず、導入済みの選択だけを即座に返します。候補一覧は`models list`が返し、こちらはOpenRouter APIを引いて1日キャッシュします（`--refresh`でTTLを無視）。取得に失敗してもキャッシュがあれば止まりません。
+
+applyが受け付けるのは`schema_version`・`models`・`default_model`だけです。表示名・reasoning effort・並び順は変更できません。lifecycle lock内でregistry整合性と「選択中のmodelがkeyで呼び出せること」を検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。検証に落ちれば全対象が元へ戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
+
+同梱registryに無いmodelを選ぶと、`models list`のエントリから導入済みregistry（`~/.local/share/codex-openrouter-desktop/state/registry.json`）を実体化し、**同じtransactionへ載せます**。片方だけ進むと「選んだmodelがregistryに無い」状態で次の起動に入るためです。registryのエントリはライブAPIから毎回導出し直し、同梱registryが持つ日本語の説明文だけを残します。
 
 ## 更新と移行
 

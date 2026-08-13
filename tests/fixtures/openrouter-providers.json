@@ -1,0 +1,228 @@
+{
+ "data": [
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Moonshot AI",
+   "slug": "moonshotai"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Morph",
+   "slug": "morph"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Z.AI",
+   "slug": "z-ai"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Io Net",
+   "slug": "io-net"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Ionstream",
+   "slug": "ionstream"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "BaseTen",
+   "slug": "baseten"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Crusoe",
+   "slug": "crusoe"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Modal",
+   "slug": "modal"
+  },
+  {
+   "dataPolicy": {
+    "training": true
+   },
+   "name": "DeepSeek",
+   "slug": "deepseek"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Mancer 2",
+   "slug": "mancer"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "DeepInfra",
+   "slug": "deepinfra"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Sail Research",
+   "slug": "sail-research"
+  },
+  {
+   "dataPolicy": {
+    "training": true
+   },
+   "name": "Liquid",
+   "slug": "liquid"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Decart",
+   "slug": "decart"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Seed",
+   "slug": "seed"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "CoreWeave",
+   "slug": "coreweave"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Phala",
+   "slug": "phala"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "SiliconFlow",
+   "slug": "siliconflow"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Relace",
+   "slug": "relace"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Together",
+   "slug": "together"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Amazon Bedrock",
+   "slug": "amazon-bedrock"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "DigitalOcean",
+   "slug": "digitalocean"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Inceptron",
+   "slug": "inceptron"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Google",
+   "slug": "google-vertex"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Parasail",
+   "slug": "parasail"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "OpenInference",
+   "slug": "open-inference"
+  },
+  {
+   "dataPolicy": {
+    "training": true
+   },
+   "name": "Nvidia",
+   "slug": "nvidia"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Venice",
+   "slug": "venice"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Wafer",
+   "slug": "wafer"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "AkashML",
+   "slug": "akashml"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Fireworks",
+   "slug": "fireworks"
+  },
+  {
+   "dataPolicy": {
+    "training": false
+   },
+   "name": "Novita",
+   "slug": "novita"
+  }
+ ]
+}

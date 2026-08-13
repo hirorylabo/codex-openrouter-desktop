@@ -8,9 +8,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from codex_openrouter import cli, settings
+from codex_openrouter import cli, modelcatalog, settings
 from codex_openrouter.openrouter import OpenRouterError
 from codex_openrouter.profile import ProfileError, resolve_profile
+from codex_openrouter.settings import SettingsError
 from codex_openrouter.supervisor import State
 from tests_support import make_paths
 
@@ -413,6 +414,177 @@ class CommandTests(SettingsTestCase):
         self.assertIn("ERROR:", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(before, self.snapshot())
+
+
+class ModelAdditionTests(SettingsTestCase):
+    """同梱registryに無いmodelを足す経路。
+
+    追加はcatalogから registry エントリを実体化することで行う。registryは
+    profile・state・manifestと**同じtransaction**で置き換わらなければならない。
+    片方だけ進むと「選んだmodelがregistryに無い」状態で次の起動に入る。
+    """
+
+    NEW = "anthropic/claude-opus-5"
+
+    def setUp(self) -> None:
+        super().setUp()
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        self.catalog = modelcatalog.build(
+            json.loads(REGISTRY.read_text(encoding="utf-8")),
+            models_document=json.loads(
+                (fixtures / "openrouter-models.json").read_text(encoding="utf-8")
+            ),
+            zdr_document=json.loads(
+                (fixtures / "openrouter-zdr.json").read_text(encoding="utf-8")
+            ),
+        )
+
+    def add(self, models: list[str], default: str, **kwargs):
+        with mock.patch.object(modelcatalog, "load", return_value=self.catalog):
+            return self.apply(self.selection(models, default), **kwargs)
+
+    def tracked(self) -> list[Path]:
+        return [*super().tracked(), self.paths.installed_registry]
+
+    def test_adding_a_model_writes_it_into_the_installed_registry(self) -> None:
+        result = self.add([*ALL_MODELS, self.NEW], self.NEW)
+        self.assertEqual("applied", result["result"])
+
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        self.assertIn(self.NEW, installed["models"])
+        entry = installed["models"][self.NEW]
+        self.assertEqual("Claude Opus 5", entry["display_name"])
+        self.assertTrue(entry["efforts"])
+        self.assertIn("fallback_headline", entry)
+
+        profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
+        self.assertIn(self.NEW, profile.models)
+        self.assertEqual(self.NEW, profile.default_model)
+
+    def test_bundled_models_keep_their_japanese_prose_after_an_addition(self) -> None:
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        bundled = json.loads(REGISTRY.read_text(encoding="utf-8"))["models"]
+        for slug, spec in bundled.items():
+            with self.subTest(model=slug):
+                self.assertEqual(spec["capability"], installed["models"][slug]["capability"])
+                self.assertEqual(
+                    spec["reasoning_note"], installed["models"][slug]["reasoning_note"]
+                )
+
+    def test_bundled_models_stay_first_so_picker_order_does_not_jump(self) -> None:
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        self.assertEqual(list(ALL_MODELS) + [self.NEW], list(installed["models"]))
+
+    def test_a_failed_validation_leaves_the_registry_untouched(self) -> None:
+        before = self.snapshot()
+        with self.assertRaises(OpenRouterError):
+            self.add(
+                [*ALL_MODELS, self.NEW],
+                self.NEW,
+                validate=OpenRouterError("実効model集合と一致しません"),
+            )
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.paths.installed_registry.exists())
+
+    def test_a_model_missing_from_the_catalog_is_refused(self) -> None:
+        before = self.snapshot()
+        with self.assertRaises(SettingsError):
+            self.add([*ALL_MODELS, "nope/not-real"], ALL_MODELS[0])
+        self.assertEqual(before, self.snapshot())
+
+    def test_toggling_known_models_never_touches_the_network(self) -> None:
+        """既存registryで足りる選択でcatalogを取りに行かないこと。
+
+        設定画面での付け外しは大半がこの経路。ここで410件を取ると遅いだけ。
+        """
+        with mock.patch.object(modelcatalog, "load", side_effect=AssertionError("取得した")):
+            result = self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+        self.assertEqual("applied", result["result"])
+
+    def test_removing_an_added_model_keeps_working_without_the_catalog(self) -> None:
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+        with mock.patch.object(modelcatalog, "load", side_effect=AssertionError("取得した")):
+            result = self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+        self.assertEqual("applied", result["result"])
+        profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
+        self.assertEqual((ALL_MODELS[0],), profile.models)
+
+    def test_re_saving_the_same_selection_after_an_addition_is_a_no_op(self) -> None:
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+        again = self.add([*ALL_MODELS, self.NEW], self.NEW)
+        self.assertEqual("unchanged", again["result"])
+
+    def test_a_non_zdr_model_is_recorded_so_the_guard_can_stop_forcing_zdr(self) -> None:
+        free = "liquid/lfm-2.5-2.6b:free"
+        self.add([*ALL_MODELS, free], ALL_MODELS[0])
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        self.assertFalse(installed["models"][free]["zdr_supported"])
+        self.assertNotIn("fallback_zdr", installed["models"][free])
+        # 既存modelの強制は外れない。
+        for slug in ALL_MODELS:
+            self.assertTrue(installed["models"][slug]["zdr_supported"])
+
+    def test_a_previously_added_model_missing_from_the_catalog_does_not_block_others(
+        self,
+    ) -> None:
+        """catalogから消えたmodelを既に選んでいても、別のmodelを足せること。
+
+        OpenRouterの候補は日々入れ替わる。手元にエントリがあるmodelまで
+        「候補に無い」と扱うと、無関係な追加操作が巻き添えで失敗する。
+        """
+        other = "xiaomi/mimo-v2.5"
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+
+        # NEW がcatalogから消えた状態を作る。
+        without_new = {
+            **self.catalog,
+            "models": [row for row in self.catalog["models"] if row["id"] != self.NEW],
+        }
+        with mock.patch.object(modelcatalog, "load", return_value=without_new):
+            result = self.apply(self.selection([*ALL_MODELS, self.NEW, other], self.NEW))
+
+        self.assertEqual("applied", result["result"])
+        installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))
+        # 消えた側は手元のエントリで残り、新しい側は追加できている。
+        self.assertIn(self.NEW, installed["models"])
+        self.assertIn(other, installed["models"])
+        profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
+        self.assertIn(self.NEW, profile.models)
+        self.assertIn(other, profile.models)
+
+    def test_supervisor_and_catalog_read_the_grown_registry(self) -> None:
+        """追加したmodelを同梱registryしか知らない経路へ渡さないこと。
+
+        `catalog.generate` は `all_models[model]` を引くので、同梱registryのままだと
+        追加modelでKeyErrorになり、pickerに一切出せない。shutdown時のnative復帰も
+        「これはOpenRouterのmodelだ」と気づけなくなり、catalogを外したconfigに
+        OpenRouter slugが残る。
+        """
+        from codex_openrouter import catalog as catalog_module
+        from codex_openrouter.supervisor import Supervisor
+
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+
+        supervisor = Supervisor(self.paths, REGISTRY)
+        self.assertEqual(self.paths.installed_registry, supervisor.registry_path)
+        self.assertIn(self.NEW, supervisor.all_registry_models)
+
+        # catalog生成が追加modelを引けること（bundled環境ではKeyErrorになっていた）。
+        registry = json.loads(supervisor.registry_path.read_text(encoding="utf-8"))
+        self.assertIn(self.NEW, registry["models"])
+        # 価格契約は同梱registryから引き継がれる。
+        self.assertIn("price_refresh", registry)
+        self.assertIn("catalog_refresh", registry)
+        prices = catalog_module.pricing.fallback_prices(registry)
+        self.assertIn(self.NEW, prices["headline"])
+
+    def test_show_reports_the_grown_registry(self) -> None:
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+        document = settings.show_document(self.paths, REGISTRY)
+        self.assertIn(self.NEW, [item["id"] for item in document["available"]])
+        self.assertIn(self.NEW, document["profile"]["models"])
 
 
 if __name__ == "__main__":
