@@ -190,8 +190,13 @@ def _apply_locked(
         write_json(stage / "profile.json", profile.as_json())
         # active・guard port・保存済み選択は触らない。ここは「次回起動へ効かせる」
         # 変更であって、いま動いているセッションの状態ではない。
+        # catalog digestだけは消す。このtransactionでcatalog自体を消すので、
+        # 残すと「存在しないcatalogがこのprofileで作られている」という嘘になる。
         replace(
-            state, profile_digest=profile.digest, pending_default_model=True
+            state,
+            profile_digest=profile.digest,
+            pending_default_model=True,
+            catalog_profile_digest=None,
         ).save(stage / "supervisor.json")
         write_json(stage / "install-manifest.json", {**manifest, "profile_digest": profile.digest})
 

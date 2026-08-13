@@ -300,6 +300,7 @@ class ApplyTests(SettingsTestCase):
             build="6396",
             saved_model="gpt-5.6-sol",
             saved_provider="openai",
+            catalog_profile_digest=self.profile.digest,
         ).save(self.paths.supervisor_state)
         model = ALL_MODELS[3]
         self.apply(self.selection([model], model))
@@ -307,6 +308,8 @@ class ApplyTests(SettingsTestCase):
         self.assertEqual(("26.803", "6396"), (state.version, state.build))
         self.assertEqual("gpt-5.6-sol", state.saved_model)
         self.assertEqual("openai", state.saved_provider)
+        # catalogごと消したので、それを指すdigestも残さない。
+        self.assertIsNone(state.catalog_profile_digest)
 
 
 class SingleModelConsistencyTests(SettingsTestCase):
