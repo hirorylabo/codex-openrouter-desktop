@@ -73,6 +73,12 @@ final class LauncherApp: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @discardableResult
     private func adopt(workspace path: String) -> Bool {
+        // 起動後のdropは受け取らない。workspaceは起動時に純正appへ渡り済みで、
+        // ここで差し替えても効かないうえ、隠した管理画面が戻ってくる。
+        guard !launchInProgress else {
+            activateStockWindow()
+            return false
+        }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
