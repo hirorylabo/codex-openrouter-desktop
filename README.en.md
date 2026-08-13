@@ -49,6 +49,15 @@ OAuth uses PKCE S256 with a temporary random-port `127.0.0.1` callback. The API 
 
 When Finder's desktop stacks are enabled, the launcher appears inside the Applications stack. Turn off **Finder > View > Use Stacks** to keep it directly visible. Setup and upgrade regenerate its project icon, signature, and default workspace.
 
+### Switching from the stock app
+
+The stock mode and OpenRouter mode cannot run concurrently because they use the same application, userData, and `~/.codex/config.toml`. Clicking `Codex OpenRouter.app` while the stock app is running asks whether to quit it normally and restart the same signed app in OpenRouter mode.
+
+- Cancel brings the existing stock app forward without changing configuration or starting the guard.
+- Switching requests normal termination only; the launcher never force-kills an unresponsive app.
+- `codex-openrouter launch` has no confirmation UI, so close the stock app before using the CLI.
+- Setup, upgrade, rollback, migration, and launch operations are serialized per user; a competing operation stops before changing shared state.
+
 ## Commands
 
 ```text
@@ -68,5 +77,22 @@ Custom profiles may only select models already present in [`models/registry.json
 After downloading a newer release or updating a source checkout, close ChatGPT.app and run the repository's `./codex-openrouter upgrade`. Runtime files, the launcher, manifest, installed profile, and supervisor state are staged and promoted transactionally. Verification failure restores every promoted target. `codex-openrouter rollback` restores the previous promoted set.
 
 When the launcher is inactive, the persistent provider definition points to non-connecting port `0` and its authentication command always fails. During a launch, the guard binds an ephemeral loopback port; normal cleanup restores the inactive stub before stopping the guard. After a forced kill or power loss, the next dedicated launch performs the same self-heal before starting ChatGPT.app.
+
+## Development
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m compileall -q src portable scripts
+PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
+python3 scripts/secret_scan.py --tree .
+python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
+```
+
+For manual checks with the real ChatGPT.app, run the isolated-home E2E first. After upgrading the installed runtime, run two launcher cycles; the latter command asks you to quit ChatGPT.app normally during each cycle.
+
+```bash
+PYTHONPATH=src python3 scripts/macos_live_e2e.py
+scripts/macos_installed_e2e.zsh
+```
 
 See the Japanese README for the full operational details, [`SECURITY.md`](./SECURITY.md) for vulnerability reporting, and [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for third-party licensing.

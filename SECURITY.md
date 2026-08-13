@@ -23,4 +23,6 @@ Include the CLI version, macOS/ChatGPT build, the redacted `github-issue-diagnos
 
 The official `/Applications/ChatGPT.app` is never modified or cloned. The launcher temporarily adds managed catalog/provider blocks to the shared Codex configuration. When inactive, the persistent provider points to loopback port `0` and uses an authentication command that always fails. During normal cleanup the inactive stub is restored before the guard stops.
 
+Stock and OpenRouter modes are mutually exclusive. If the stock app is already running, the Desktop launcher requires confirmation before requesting a normal quit; cancellation performs no managed-config or guard changes. Mutating lifecycle operations use a per-user kernel lock so a competing process cannot self-heal or replace an active operation's state. The launcher does not force-kill the stock app.
+
 After `SIGKILL` or power loss, the active ephemeral port and launch token may remain until the next dedicated launch performs self-heal. The OpenRouter API key is still not exposed on loopback. A malicious process with the same user privileges may theoretically read the temporary token or capture a prompt during that interval; no always-running daemon is installed to close this residual local threat.

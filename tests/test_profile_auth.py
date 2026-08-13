@@ -135,7 +135,15 @@ class AuthenticationTests(unittest.TestCase):
             registry={},
         )
         args = SimpleNamespace(profile=None, auth="paste", workspace="/tmp/workspace")
-        with mock.patch.object(cli.UserPaths, "current", return_value=mock.Mock()), \
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(
+                 cli.UserPaths,
+                 "current",
+                 return_value=SimpleNamespace(
+                     state_dir=Path(directory) / "state",
+                     stock_app=Path("/Applications/ChatGPT.app"),
+                 ),
+             ), \
              mock.patch.object(cli, "assert_apple_silicon"), \
              mock.patch.object(cli, "detect_stock"), \
              mock.patch.object(cli, "resolved_profile", return_value=(Path("profile.json"), profile)), \
@@ -143,7 +151,7 @@ class AuthenticationTests(unittest.TestCase):
              mock.patch.object(cli, "obtain_key", return_value=key), \
              mock.patch.object(cli, "validate_key_and_profile", return_value={"limit": 10}) as validate, \
              mock.patch.object(cli, "root", return_value=ROOT), \
-             mock.patch.object(install_module, "install", return_value=0) as install:
+             mock.patch.object(install_module, "_install_unlocked", return_value=0) as install:
             self.assertEqual(0, cli.setup_command(args))
         validate.assert_called_once_with(key, {"minimax/minimax-m3"})
         self.assertTrue(store.stored)

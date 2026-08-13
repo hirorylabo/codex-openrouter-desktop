@@ -26,6 +26,7 @@ from . import __version__
 from .app import UserPaths, assert_apple_silicon, detect_stock
 from .auth import CredentialStore
 from . import configblock
+from .lifecycle import LifecycleLock, LifecycleLockError
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
 from .profile import ResolvedProfile, resolve_profile, select_profile_path
@@ -349,6 +350,23 @@ def upgrade(
     *,
     network_check: bool = True,
 ) -> int:
+    """runtime更新を共有lifecycle lock内で実行する。"""
+    with LifecycleLock(paths):
+        return _upgrade_unlocked(
+            source_root,
+            paths,
+            profile_argument,
+            network_check=network_check,
+        )
+
+
+def _upgrade_unlocked(
+    source_root: Path,
+    paths: UserPaths,
+    profile_argument: str | None = None,
+    *,
+    network_check: bool = True,
+) -> int:
     assert_apple_silicon()
     if not paths.bin_dir.is_dir():
         raise UpgradeError("既存installationがありません。先にsetupを実行してください")
@@ -431,6 +449,11 @@ def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
     try:
         upgrade(source_root, paths, profile_argument, network_check=False)
         result = "success"
+    except LifecycleLockError:
+        # 起動中・別更新中は一時的な競合であり、同じdigestの恒久失敗にしない。
+        print("自動更新: Codex OpenRouterが使用中のためskipします")
+        print(STATUS_LAUNCHING, flush=True)
+        return 0
     except Exception as error:  # 起動は止めない
         result = "failure"
         print(f"自動更新に失敗しました（起動は続行します）: {error}")

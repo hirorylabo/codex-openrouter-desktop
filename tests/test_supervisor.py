@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from codex_openrouter import configblock, supervisor as sup  # noqa: E402
 from codex_openrouter.app import UserPaths  # noqa: E402
+from codex_openrouter.lifecycle import LifecycleLock, LifecycleLockError  # noqa: E402
 from codex_openrouter.profile import ResolvedProfile  # noqa: E402
 
 REGISTRY_PATH = ROOT / "models/registry.json"
@@ -229,6 +230,33 @@ class ExclusionTests(SupervisorTestCase):
     def test_allows_when_stock_app_is_not_running(self):
         with mock.patch.object(sup, "process_pids", return_value=[]):
             self.supervisor.assert_stock_not_running()
+
+    def test_running_stock_app_is_rejected_without_self_heal(self):
+        state = b'{"active": true, "guard_port": 49152}\n'
+        self.paths.supervisor_state.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.supervisor_state.write_bytes(state)
+        self.paths.guard_token.write_text("stale-token", encoding="utf-8")
+        config = self.paths.shared_config.read_bytes()
+
+        with mock.patch.object(sup, "process_pids", return_value=[1234]), \
+             mock.patch.object(self.supervisor, "self_heal") as self_heal, \
+             self.assertRaises(sup.SupervisorError):
+            self.supervisor.run()
+
+        self_heal.assert_not_called()
+        self.assertEqual(config, self.paths.shared_config.read_bytes())
+        self.assertEqual(state, self.paths.supervisor_state.read_bytes())
+        self.assertEqual("stale-token", self.paths.guard_token.read_text(encoding="utf-8"))
+
+    def test_competing_launch_does_not_self_heal_active_config(self):
+        self.supervisor.apply_config(49152)
+        config = self.paths.shared_config.read_bytes()
+        with LifecycleLock(self.paths), \
+             mock.patch.object(self.supervisor, "self_heal") as self_heal, \
+             self.assertRaises(LifecycleLockError):
+            self.supervisor.run()
+        self_heal.assert_not_called()
+        self.assertEqual(config, self.paths.shared_config.read_bytes())
 
 
 class LaunchTests(SupervisorTestCase):

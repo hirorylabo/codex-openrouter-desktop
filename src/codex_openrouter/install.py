@@ -18,6 +18,7 @@ import subprocess
 from . import __version__
 from .app import UserPaths, assert_apple_silicon, detect_stock
 from .auth import temporary_store
+from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
 from .processes import process_pids
 from .upgrade import (
@@ -58,7 +59,26 @@ def install(
     *,
     network_check: bool = True,
 ) -> int:
-    """初回・更新の両方をこの1本で扱う。"""
+    """初回・更新処理を共有lifecycle lock内で実行する。"""
+    with LifecycleLock(paths):
+        return _install_unlocked(
+            source_root,
+            paths,
+            profile_argument,
+            workspace,
+            network_check=network_check,
+        )
+
+
+def _install_unlocked(
+    source_root: Path,
+    paths: UserPaths,
+    profile_argument: str | None = None,
+    workspace: Path | None = None,
+    *,
+    network_check: bool = True,
+) -> int:
+    """lock取得済みの初回・更新共通処理。"""
     stock, profile = preflight(paths, source_root, profile_argument)
     first_time = not paths.support_root.exists()
 

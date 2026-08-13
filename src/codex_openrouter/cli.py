@@ -18,6 +18,7 @@ from .auth import (
     temporary_store,
 )
 from . import configblock
+from .lifecycle import LifecycleLock
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
 from .profile import ProfileError, ResolvedProfile, resolve_profile, select_profile_path
@@ -102,6 +103,11 @@ def check_command(args: argparse.Namespace) -> int:
 
 def setup_command(args: argparse.Namespace) -> int:
     paths = UserPaths.current()
+    with LifecycleLock(paths):
+        return _setup_locked(args, paths)
+
+
+def _setup_locked(args: argparse.Namespace, paths: UserPaths) -> int:
     assert_apple_silicon()
     detect_stock(paths.stock_app)
     selected, profile = resolved_profile(args.profile, paths)
@@ -121,9 +127,9 @@ def setup_command(args: argparse.Namespace) -> int:
     finally:
         if temporary is not None:
             temporary.cleanup()
-    from .install import install
+    from .install import _install_unlocked
 
-    return install(
+    return _install_unlocked(
         root(),
         paths,
         args.profile,
@@ -178,6 +184,11 @@ def rollback_command(_args: argparse.Namespace) -> int:
     from .promotion import atomic_promote, rollback_replacements
 
     paths = UserPaths.current()
+    with LifecycleLock(paths):
+        return _rollback_locked(paths)
+
+
+def _rollback_locked(paths: UserPaths) -> int:
     upgrade_root = paths.state_dir / "upgrade-backups"
     backups = sorted(
         (
@@ -248,6 +259,11 @@ def migrate_command(args: argparse.Namespace) -> int:
     from .supervisor import Supervisor
 
     paths = UserPaths.current()
+    with LifecycleLock(paths):
+        return _migrate_locked(args, paths)
+
+
+def _migrate_locked(args: argparse.Namespace, paths: UserPaths) -> int:
     actions: list[str] = []
     if process_pids(paths.openrouter_app / "Contents/MacOS/ChatGPT"):
         raise CliError("旧専用appを終了してからmigrateしてください")
@@ -444,6 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     from .install import InstallError
+    from .lifecycle import LifecycleLockError
     from .promotion import PromotionError
     from .supervisor import SupervisorError
     from .upgrade import UpgradeError
@@ -456,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         AuthenticationError,
         configblock.ConfigBlockError,
         InstallError,
+        LifecycleLockError,
         OpenRouterError,
         ProfileError,
         ProcessError,

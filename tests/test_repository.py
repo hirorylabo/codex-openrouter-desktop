@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 from codex_openrouter import doctor as doctor_module
 from codex_openrouter import upgrade as upgrade_module
+from scripts import macos_live_e2e as live_e2e
 
 
 class RepositoryTests(unittest.TestCase):
@@ -224,6 +225,49 @@ class RepositoryTests(unittest.TestCase):
         )
         for sentinel in (upgrade_module.STATUS_UPDATING, upgrade_module.STATUS_LAUNCHING):
             self.assertIn(f'"{sentinel}"', swift)
+
+    def test_desktop_launcher_gracefully_hands_off_from_the_exact_stock_app(self) -> None:
+        """純正起動中は確認後に通常終了を待ち、強制終了せずhelperへ渡す。"""
+        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('URL(fileURLWithPath: "/Applications/ChatGPT.app")', swift)
+        self.assertIn("$0.bundleURL?.standardizedFileURL == stockAppURL", swift)
+        self.assertIn("終了してOpenRouterモードへ切り替える", swift)
+        self.assertIn("application.terminate()", swift)
+        self.assertIn("Date().addingTimeInterval(30)", swift)
+        self.assertIn("waitForStockTermination", swift)
+        self.assertIn("ignoredStockProcessIdentifiers", swift)
+        self.assertNotIn("forceTerminate()", swift)
+
+    def test_installed_e2e_detects_lifecycle_state_without_copying_markers(self) -> None:
+        """実launcher E2Eはmarker表記変更でactiveを見失ってはいけない。"""
+        source = (ROOT / "scripts/macos_installed_e2e.zsh").read_text(encoding="utf-8")
+        self.assertIn("state_field active", source)
+        self.assertIn("state_field guard_port", source)
+        self.assertIn('"$mode" == "600"', source)
+        self.assertIn("run_cycle 1", source)
+        self.assertIn("run_cycle 2", source)
+        self.assertIn("wait_launcher_exit", source)
+        self.assertIn("codex_openrouter.processes", source)
+        self.assertNotIn("pgrep", source)
+        self.assertNotIn("codex-openrouter:catalog", source)
+
+    def test_live_e2e_removes_auth_copy_even_when_cleanup_raises(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            base = Path(directory) / "e2e"
+            auth_copy = base / ".codex/auth.json"
+
+            def fail_after_copy() -> int:
+                auth_copy.parent.mkdir(parents=True)
+                auth_copy.write_text("sensitive-copy", encoding="utf-8")
+                raise RuntimeError("cleanup failed")
+
+            with mock.patch.object(live_e2e, "BASE", base), \
+                 mock.patch.object(live_e2e, "_run_main", side_effect=fail_after_copy), \
+                 self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                live_e2e.main()
+            self.assertFalse(auth_copy.exists())
 
     def test_desktop_launcher_has_a_generated_project_icon(self) -> None:
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")

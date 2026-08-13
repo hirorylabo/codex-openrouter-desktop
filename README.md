@@ -96,6 +96,15 @@ codex-openrouter auth login|rotate|logout
 
 FinderでDesktopの「スタックを使用」がONの場合、launcherは「アプリケーション」stack内へ表示されます。直接見える位置へ置く場合はFinderの`表示 > スタックを使用`をOFFにしてください。launcherはproject固有icon、bundle署名、既定workspaceをsetup/upgradeごとに再生成します。
 
+### 純正appからOpenRouterモードへ切り替える
+
+純正`ChatGPT.app`とOpenRouterモードは、同じapp・userData・`~/.codex/config.toml`を使うため同時起動しません。純正appの起動中に`Codex OpenRouter.app`をクリックすると、通常終了してOpenRouterモードで再起動するか確認します。
+
+- 「キャンセル」では既存の純正appを前面へ戻し、configやguardを変更しません。
+- 切り替える場合も通常終了だけを要求し、応答しないappを強制終了しません。
+- CLIの`codex-openrouter launch`は確認UIを持たないため、純正appを終了してから実行してください。
+- setup、upgrade、rollback、migrate、launchはユーザー単位で排他され、並行実行した2本目は共有状態を変更する前に停止します。
+
 ### クリック起動時の自動更新
 
 リポジトリから導入した場合、導入元のpathが`install-manifest.json`へ記録されます。以降は`Codex OpenRouter.app`をクリックするたびに導入元と導入済みruntimeの内容ハッシュを比べ、**差分があるときだけ**自動でupgradeします（更新中は進行状況の小窓が出ます）。差分が無ければ何もせず起動します。
@@ -166,8 +175,16 @@ codex-openrouter auth logout
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src portable scripts
+PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
 python3 scripts/secret_scan.py --tree .
 python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
+```
+
+実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。
+
+```bash
+PYTHONPATH=src python3 scripts/macos_live_e2e.py
+scripts/macos_installed_e2e.zsh
 ```
 
 セキュリティ報告は[`SECURITY.md`](./SECURITY.md)、第三者コードは[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)を参照してください。

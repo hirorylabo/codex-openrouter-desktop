@@ -25,6 +25,7 @@ import threading
 from . import catalog, configblock, guard as guard_module, watcher as watcher_module
 from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
+from .lifecycle import LifecycleLock
 from .processes import process_pids
 from .profile import ResolvedProfile, resolve_profile
 
@@ -354,36 +355,38 @@ class Supervisor:
 
     # ---------------------------------------------------------------------
     def run(self) -> int:
-        for message in self.self_heal():
-            print(f"復旧: {message}")
-        self.assert_stock_not_running()
-        if self.refresh_catalog_if_needed():
-            print(f"モデルカタログを再生成しました（build {self.state.build}）")
+        with LifecycleLock(self.paths):
+            # 純正app稼働中の拒否はconfig/stateを1byteも変更しない。
+            self.assert_stock_not_running()
+            for message in self.self_heal():
+                print(f"復旧: {message}")
+            if self.refresh_catalog_if_needed():
+                print(f"モデルカタログを再生成しました（build {self.state.build}）")
 
-        installed: list[int] = []
-        for name in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(name, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-                installed.append(name)
-            except ValueError:
-                pass
-
-        process = None
-        try:
-            port = self.start_guard()
-            self.apply_config(port)
-            self.start_watcher()
-            process = self.launch()
-            print(f"Codex OpenRouter: 起動しました (pid={process.pid}, guard=127.0.0.1:{port})")
-            process.wait()
-        except KeyboardInterrupt:
-            if process is not None and process.poll() is None:
-                process.terminate()
+            installed: list[int] = []
+            for name in (signal.SIGINT, signal.SIGTERM):
                 try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        finally:
-            for message in self.cleanup():
-                print(f"後始末: {message}")
+                    signal.signal(name, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+                    installed.append(name)
+                except ValueError:
+                    pass
+
+            process = None
+            try:
+                port = self.start_guard()
+                self.apply_config(port)
+                self.start_watcher()
+                process = self.launch()
+                print(f"Codex OpenRouter: 起動しました (pid={process.pid}, guard=127.0.0.1:{port})")
+                process.wait()
+            except KeyboardInterrupt:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            finally:
+                for message in self.cleanup():
+                    print(f"後始末: {message}")
         return 0

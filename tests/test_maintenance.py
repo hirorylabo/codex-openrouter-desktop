@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from codex_openrouter import upgrade as upgrade_module
+from codex_openrouter.lifecycle import LifecycleLock
 from codex_openrouter.processes import matching_processes
 from codex_openrouter.promotion import PromotionError, atomic_promote, rollback_replacements
 from scripts.build_release import validate_release_version
@@ -234,6 +235,12 @@ class AutoUpgradeTests(unittest.TestCase):
             # 同じ内容なら再試行しない。クリックのたびに十数秒払わないため。
             self.assertEqual(0, upgrade_module.auto_upgrade(self.paths))
             self.assertEqual(1, upgrade_call.call_count)
+
+    def test_busy_lifecycle_is_skipped_without_recording_a_failure(self) -> None:
+        self.change_source()
+        with LifecycleLock(self.paths):
+            self.assertEqual(0, upgrade_module.auto_upgrade(self.paths))
+        self.assertFalse((self.state / "selfupdate.json").exists())
 
     def test_a_further_source_change_retries_after_a_failure(self) -> None:
         self.change_source()

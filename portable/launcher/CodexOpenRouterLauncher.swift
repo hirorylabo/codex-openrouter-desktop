@@ -20,6 +20,7 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
     private var launchInProgress = false
     private var outputTail = ""
     private var progressWindow: NSWindow?
+    private var ignoredStockProcessIdentifiers = Set<pid_t>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
@@ -57,6 +58,51 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
         }
 
         launchInProgress = true
+        let stockApplications = runningStockApplications()
+        guard !stockApplications.isEmpty else {
+            startLauncherHelper(workspace: workspace)
+            return
+        }
+
+        guard confirmSwitchFromStockApp() else {
+            stockApplications.first?.activate(options: [.activateAllWindows])
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
+        ignoredStockProcessIdentifiers = Set(stockApplications.map(\.processIdentifier))
+        var terminationRequested = true
+        for application in stockApplications {
+            if !application.terminate() {
+                terminationRequested = false
+            }
+        }
+        guard terminationRequested else {
+            showError("純正ChatGPTへ終了を要求できませんでした。\n手動で終了してから、もう一度お試しください。")
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
+        showProgress("純正ChatGPTの終了を待っています…")
+        waitForStockTermination(
+            processIdentifiers: ignoredStockProcessIdentifiers,
+            deadline: Date().addingTimeInterval(30)
+        ) { [weak self] terminated in
+            guard let self else { return }
+            self.hideProgress()
+            guard terminated else {
+                self.showError(
+                    "純正ChatGPTが30秒以内に終了しませんでした。\n" +
+                    "手動で終了してから、もう一度お試しください。"
+                )
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            self.startLauncherHelper(workspace: workspace)
+        }
+    }
+
+    private func startLauncherHelper(workspace: String) {
         let process = Process()
         let outputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: launcherPath)
@@ -101,6 +147,50 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func runningStockApplications() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.bundleURL?.standardizedFileURL == stockAppURL
+        }
+    }
+
+    private func confirmSwitchFromStockApp() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "純正ChatGPTを終了して切り替えますか？"
+        alert.informativeText =
+            "純正ChatGPTを通常終了し、OpenRouterモードで再起動します。" +
+            "未保存の入力がある場合はキャンセルしてください。"
+        alert.addButton(withTitle: "終了してOpenRouterモードへ切り替える")
+        alert.addButton(withTitle: "キャンセル")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func waitForStockTermination(
+        processIdentifiers: Set<pid_t>,
+        deadline: Date,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let stillRunning = runningStockApplications().contains {
+            processIdentifiers.contains($0.processIdentifier)
+        }
+        guard stillRunning else {
+            completion(true)
+            return
+        }
+        guard Date() < deadline else {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.waitForStockTermination(
+                processIdentifiers: processIdentifiers,
+                deadline: deadline,
+                completion: completion
+            )
+        }
+    }
+
     /// 子の出力を溜めつつ、進行状況のsentinelに反応する。
     private func consume(_ text: String) {
         outputTail += text
@@ -133,6 +223,7 @@ final class CodexOpenRouterLauncher: NSObject, NSApplicationDelegate {
     private func activateStockWindow() -> Bool {
         guard let application = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleURL?.standardizedFileURL == stockAppURL
+                && !ignoredStockProcessIdentifiers.contains($0.processIdentifier)
         }) else {
             return false
         }
