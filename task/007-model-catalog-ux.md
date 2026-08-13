@@ -184,7 +184,7 @@ scripts/macos_installed_e2e.zsh
 
 実装完了。stacked branch `codex/model-catalog-ux`（PR #2 の `codex/model-settings-launcher` の上）。
 
-通したもの: unittest 246件（新規37件）、compileall、synthetic E2E、secret scan（tree + archive）、
+通したもの: unittest 248件（新規39件）、compileall、synthetic E2E、secret scan（tree + archive）、
 release build、`swiftc portable/launcher/app/*.swift`、`zsh -n` 3本 + 埋め込みpythonブロックの
 構文検査、隔離state_dirでのライブ取得。
 
@@ -192,6 +192,21 @@ release build、`swiftc portable/launcher/app/*.swift`、`zsh -n` 3本 + 埋め�
 
 ライブ取得は0.5秒・候補328件（ZDR 175 / free 14 / reasoning 116）。cacheは347KBを0600で書き、
 2回目は3ms。cacheに秘密値は入らない。
+
+### 実装中に見つけて直した不具合
+
+1. **追加modelでcatalog生成がKeyError**。`catalog.generate` が同梱registryを読むため、
+   追加modelをpickerに一切出せなかった。shutdown時のnative復帰も同じ集合を見るので、
+   壊れる側と検出するdoctorが揃って盲目になる組み合わせだった。
+2. **ZDR可否をZDR価格が引けるかで判定していた**（実装中に自分で入れたバグ）。cache価格を
+   公開しないproviderが80 modelあり、実際はZDRで動くmodelのZDR強制が外れていた。
+3. **価格欠損1件で全modelの価格がfallbackへ落ちる**。cache価格やZDR価格を公開しないmodelを
+   1件選ぶだけで発生。
+4. **catalogから消えたmodelが無関係な追加を巻き添えにする**。手元のエントリを既知として
+   扱っていなかった。
+5. 同梱registryのfallback価格の陳腐化と、参照されていない `negative_model`。
+
+1・4は回帰テストが修正前に落ちることを確認済み。
 
 ### 計画から変えた点
 
