@@ -102,4 +102,21 @@ scripts/macos_installed_e2e.zsh
 
 ## Status
 
-実装中。
+実装完了・レビュー1巡目まで反映済み（HEAD = `804325e`）。
+
+通したもの: unittest 209件、compileall、synthetic E2E、secret scan（tree + archive）、
+release build、`swiftc portable/launcher/app/*.swift`、`zsh -n` 3本、
+一時ディレクトリでの `build_launcher`（plutil / icon / swiftc / codesign --verify）、
+実state に対する読み取り専用の `profile show --json` と `doctor`（RESULT: PASS）。
+
+レビュー1巡目で直したもの:
+
+- SIGKILL後の`active`残骸で設定画面が永久に編集不可になる問題（`openrouter_is_running`）
+- `⌘,`の再表示でチェックが巻き戻る問題（読み込み済みなら再読込しない）
+- 読み込み失敗後にhandoffキャンセルで「モデル設定…」が有効へ戻る問題
+- doctorへ install-manifest の profile digest 照合を追加
+
+未実施: 実機の対話確認。`scripts/macos_installed_e2e.zsh` の
+`manual_checklist` に列挙した6項目（管理画面・`⌘,`・folder drop・純正appからの
+handoff・秘密値非表示・純正app無改変）と launcher 2 cycle は、導入済みruntimeを
+`./codex-openrouter upgrade` で更新したうえで利用者が実行する。
