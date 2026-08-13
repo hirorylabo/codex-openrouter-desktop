@@ -172,6 +172,8 @@ class RepositoryTests(unittest.TestCase):
         upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
         self.assertIn("(stage_support, paths.support_root)", upgrade)
         self.assertIn("paths.desktop_launcher", upgrade)
+        self.assertIn('pin_python_shebang(stage_bin / "codex-openrouter", python)', upgrade)
+        self.assertIn('pin_python_shebang(stage_bin / "codex-openrouter-doctor", python)', upgrade)
         # ASARパッチ方式の痕跡が残っていないこと。
         for retired in (
             "patched_asar_sha256",
@@ -330,11 +332,27 @@ class RepositoryTests(unittest.TestCase):
         """
         swift = (LAUNCHER_SOURCES / "ModelSettingsWindow.swift").read_text(encoding="utf-8")
         table = (LAUNCHER_SOURCES / "ModelCatalogTable.swift").read_text(encoding="utf-8")
-        self.assertIn("トークン利用量", swift)
+        self.assertIn("7dトークン", table)
         self.assertNotIn("接続数", swift)
         self.assertNotIn("接続数", table)
         # トップ50圏外は0ではなくデータなし。
         self.assertIn('return "—"', table)
+
+    def test_model_catalog_sorts_from_clickable_column_headers(self) -> None:
+        """列headerを再クリックするとAppKit標準で降順・昇順が反転する。"""
+        settings = (LAUNCHER_SOURCES / "ModelSettingsWindow.swift").read_text(
+            encoding="utf-8"
+        )
+        table = (LAUNCHER_SOURCES / "ModelCatalogTable.swift").read_text(encoding="utf-8")
+        self.assertNotIn("sortPopUp", settings)
+        self.assertIn("列名をクリックして並び替え", settings)
+        self.assertIn("column.sortDescriptorPrototype", table)
+        self.assertIn("sortDescriptorsDidChange", table)
+        # 初期表示と別列の最初のクリックはいずれも降順から始める。
+        self.assertIn("sortDescriptor(for: .released, ascending: false)", table)
+        self.assertIn("sortDescriptor(for: sortField, ascending: false)", table)
+        # 未取得値は昇降順に関係なく末尾へ置く。
+        self.assertIn('case (nil, _):\n            return false', table)
 
     def test_desktop_launcher_gracefully_hands_off_from_the_exact_stock_app(self) -> None:
         """純正起動中は確認後に通常終了を待ち、強制終了せずhelperへ渡す。"""

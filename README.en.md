@@ -59,7 +59,7 @@ The launcher is a regular macOS app with a Dock icon and an application menu, bu
 
 The settings screen opens from the panel, the application menu, or `⌘,`. It lists the models OpenRouter actually serves and lets you pick one default among the selected ones. There is no entry point for arbitrary slugs. Only tool-calling models are offered, since Codex requires them.
 
-Columns show price (IN/OUT per 1M tokens), release date, 7-day token usage, and badges. Sort by release date, usage, input price, output price, or name; filter by name, `ZDRのみ` (on by default), `学習なしのみ`, `無料のみ`, and `reasoningのみ`. Selected models are pinned to the top and are never hidden by a filter.
+Columns show price (IN/OUT per 1M tokens), release date, 7-day token usage, and badges. Click the model, price, release-date, or usage column header to sort; click the same header again to toggle descending/ascending. Filter by name, `ZDRのみ` (on by default), `学習なしのみ`, `無料のみ`, and `reasoningのみ`. Selected models are pinned to the top and are never hidden by a filter.
 
 Usage is **token volume, not connection count** — that is all OpenRouter publishes, and only for the top 50 models per day. Anything outside that shows `—` rather than zero.
 

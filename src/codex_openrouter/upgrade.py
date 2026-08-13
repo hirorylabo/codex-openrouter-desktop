@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from . import __version__
@@ -162,6 +163,29 @@ def render_template(source: Path, target: Path, home: Path, python: str) -> None
     target.chmod(0o755)
 
 
+def current_python() -> str:
+    """導入済みentry pointへ固定する、現在実行中のPython 3.11+。"""
+    if sys.version_info < (3, 11):
+        raise UpgradeError(
+            "Python 3.11以上が必要です: "
+            f"{sys.version_info.major}.{sys.version_info.minor}"
+        )
+    executable = Path(sys.executable)
+    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise UpgradeError(f"実行中のPythonを固定できません: {sys.executable}")
+    return str(executable)
+
+
+def pin_python_shebang(path: Path, python: str) -> None:
+    """GUIの限定PATHでもmacOS付属Pythonへ落ちないようentry pointを固定する。"""
+    text = path.read_text(encoding="utf-8")
+    first, separator, rest = text.partition("\n")
+    if first != "#!/usr/bin/env python3" or not separator:
+        raise UpgradeError(f"Python entry pointのshebangが不正です: {path}")
+    path.write_text(f"#!{python}\n{rest}", encoding="utf-8")
+    path.chmod(0o755)
+
+
 def launcher_sources(source_root: Path) -> list[str]:
     """ランチャーappのSwift source一式。
 
@@ -233,7 +257,7 @@ def promote_runtime(
             provider_body=provider_block_body(0),
         )
 
-    python = shutil.which("python3") or "/usr/bin/python3"
+    python = current_python()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_root = paths.state_dir / "upgrade-backups" / f"{timestamp}-v{__version__}"
     for directory in (paths.bin_dir, paths.state_dir, paths.support_root.parent):
@@ -296,7 +320,7 @@ def promote_runtime(
         )
 
         shutil.copy2(source_root / "codex-openrouter", stage_bin / "codex-openrouter")
-        (stage_bin / "codex-openrouter").chmod(0o755)
+        pin_python_shebang(stage_bin / "codex-openrouter", python)
         for template, target in (
             ("codex-openrouter-doctor.py.in", "codex-openrouter-doctor"),
             ("codex-openrouter-app.zsh.in", "codex-openrouter-app"),
@@ -307,6 +331,7 @@ def promote_runtime(
                 paths.home,
                 python,
             )
+        pin_python_shebang(stage_bin / "codex-openrouter-doctor", python)
         run([python, "-m", "py_compile", str(stage_bin / "codex-openrouter-doctor")])
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
         build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")

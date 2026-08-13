@@ -6,12 +6,17 @@ import AppKit
 /// 責務にしてある。候補は300件を超えるので、選択状態の管理と表の見せ方を同じ
 /// ファイルへ混ぜると、どちらの都合で書かれた行なのか読めなくなる。
 final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    enum Sort: Int {
+    private enum SortField: String {
+        case model
+        case input
+        case output
         case released
         case usage
-        case inputPrice
-        case outputPrice
-        case name
+    }
+
+    private struct Sort {
+        var field: SortField
+        var ascending: Bool
     }
 
     struct Filters {
@@ -36,7 +41,7 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private var editable = false
     private var usageAvailable = false
 
-    var sort: Sort = .released { didSet { refilter() } }
+    private var sort = Sort(field: .released, ascending: false)
     var filters = Filters() { didSet { refilter() } }
 
     private static let usageWindow = "7d"
@@ -52,12 +57,13 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         tableView.style = .inset
 
         addColumn("pick", title: "", width: 26)
-        addColumn("model", title: "モデル", width: 250)
-        addColumn("input", title: "IN $/M", width: 74)
-        addColumn("output", title: "OUT $/M", width: 74)
-        addColumn("released", title: "公開日", width: 88)
-        addColumn("usage", title: "7dトークン", width: 88)
+        addColumn("model", title: "モデル", width: 250, sortField: .model)
+        addColumn("input", title: "IN $/M", width: 74, sortField: .input)
+        addColumn("output", title: "OUT $/M", width: 74, sortField: .output)
+        addColumn("released", title: "公開日", width: 88, sortField: .released)
+        addColumn("usage", title: "7dトークン", width: 88, sortField: .usage)
         addColumn("badges", title: "", width: 130)
+        tableView.sortDescriptors = [sortDescriptor(for: .released, ascending: false)]
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -65,11 +71,25 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         scrollView.translatesAutoresizingMaskIntoConstraints = false
     }
 
-    private func addColumn(_ identifier: String, title: String, width: CGFloat) {
+    private func addColumn(
+        _ identifier: String,
+        title: String,
+        width: CGFloat,
+        sortField: SortField? = nil
+    ) {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
         column.title = title
         column.width = width
+        if let sortField {
+            // 新しい列を最初に押したときは降順。もう一度押すとAppKitが昇順へ
+            // 反転し、標準のsort indicatorもheaderへ表示する。
+            column.sortDescriptorPrototype = sortDescriptor(for: sortField, ascending: false)
+        }
         tableView.addTableColumn(column)
+    }
+
+    private func sortDescriptor(for field: SortField, ascending: Bool) -> NSSortDescriptor {
+        NSSortDescriptor(key: field.rawValue, ascending: ascending)
     }
 
     // --- 入力 ----------------------------------------------------------------
@@ -116,29 +136,68 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         return true
     }
 
-    private func usage(_ entry: ProfileBridge.CatalogEntry) -> Double {
-        guard let raw = entry.usageTokens?[Self.usageWindow] else { return -1 }
-        return Double(raw) ?? -1
+    private func usage(_ entry: ProfileBridge.CatalogEntry) -> Double? {
+        guard let raw = entry.usageTokens?[Self.usageWindow] else { return nil }
+        return Double(raw)
+    }
+
+    private func valueOrdered<T: Comparable>(_ lhs: T?, _ rhs: T?, tie: () -> Bool) -> Bool {
+        // 「—」は値が0なのではなく未取得。方向にかかわらず末尾へ送る。
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return tie()
+        case (nil, _):
+            return false
+        case (_, nil):
+            return true
+        case let (left?, right?):
+            if left == right { return tie() }
+            return sort.ascending ? left < right : left > right
+        }
+    }
+
+    private func nameOrdered(
+        _ lhs: ProfileBridge.CatalogEntry, _ rhs: ProfileBridge.CatalogEntry
+    ) -> Bool {
+        let comparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+        if comparison == .orderedSame { return lhs.id < rhs.id }
+        return sort.ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+    }
+
+    private func tieBreak(
+        _ lhs: ProfileBridge.CatalogEntry, _ rhs: ProfileBridge.CatalogEntry
+    ) -> Bool {
+        let comparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+        if comparison == .orderedSame { return lhs.id < rhs.id }
+        return comparison == .orderedAscending
     }
 
     private func refilter() {
         let filtered = entries.filter(matches)
         let ordered: [ProfileBridge.CatalogEntry]
-        switch sort {
+        switch sort.field {
         case .released:
-            ordered = filtered.sorted { ($0.created ?? 0) > ($1.created ?? 0) }
+            ordered = filtered.sorted { lhs, rhs in
+                valueOrdered(lhs.created, rhs.created) { tieBreak(lhs, rhs) }
+            }
         case .usage:
-            ordered = filtered.sorted { usage($0) > usage($1) }
-        case .inputPrice:
-            ordered = filtered.sorted {
-                (Double($0.headline.input) ?? 0) < (Double($1.headline.input) ?? 0)
+            ordered = filtered.sorted { lhs, rhs in
+                valueOrdered(usage(lhs), usage(rhs)) { tieBreak(lhs, rhs) }
             }
-        case .outputPrice:
-            ordered = filtered.sorted {
-                (Double($0.headline.output) ?? 0) < (Double($1.headline.output) ?? 0)
+        case .input:
+            ordered = filtered.sorted { lhs, rhs in
+                valueOrdered(Double(lhs.headline.input), Double(rhs.headline.input)) {
+                    tieBreak(lhs, rhs)
+                }
             }
-        case .name:
-            ordered = filtered.sorted { $0.displayName < $1.displayName }
+        case .output:
+            ordered = filtered.sorted { lhs, rhs in
+                valueOrdered(Double(lhs.headline.output), Double(rhs.headline.output)) {
+                    tieBreak(lhs, rhs)
+                }
+            }
+        case .model:
+            ordered = filtered.sorted(by: nameOrdered)
         }
         // 選択済みを先頭へ固める。並べ替えても今選んでいるものが視界から出ない。
         visible = ordered.filter { selected.contains($0.id) }
@@ -249,4 +308,14 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
+
+    func tableView(
+        _ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
+    ) {
+        guard let descriptor = tableView.sortDescriptors.first,
+              let key = descriptor.key,
+              let field = SortField(rawValue: key) else { return }
+        sort = Sort(field: field, ascending: descriptor.ascending)
+        refilter()
+    }
 }

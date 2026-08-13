@@ -124,6 +124,24 @@ def _source_tree(root: Path) -> Path:
 
 
 class RuntimeDigestTests(unittest.TestCase):
+    def test_installed_python_entry_points_use_the_setup_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "entry"
+            entry.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+            upgrade_module.pin_python_shebang(entry, "/opt/example/python3")
+            self.assertEqual(
+                "#!/opt/example/python3\nprint('ok')\n",
+                entry.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(0o755, entry.stat().st_mode & 0o777)
+
+    def test_python_entry_point_with_an_unexpected_shebang_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "entry"
+            entry.write_text("#!/bin/zsh\nexit 0\n", encoding="utf-8")
+            with self.assertRaises(upgrade_module.UpgradeError):
+                upgrade_module.pin_python_shebang(entry, "/opt/example/python3")
+
     def test_copy_support_reproduces_the_same_digest(self) -> None:
         """コピーする側と比較する側が同じ一覧を見ていること。
 
