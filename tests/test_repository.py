@@ -307,6 +307,35 @@ class RepositoryTests(unittest.TestCase):
         # 既定を外したら黙って他へ寄せない。
         self.assertIn("defaultModel = nil", swift)
 
+    def test_adding_a_non_zdr_model_is_confirmed_rather_than_silent(self) -> None:
+        """ZDRなしの追加は既定の安全性を下げる。黙って通す経路を作らない。
+
+        Pythonの `guard.prepare` はregistryの `zdr_supported` に従うだけなので、
+        「そのmodelでZDRを外してよい」と決めているのは実質この画面になる。
+        """
+        swift = (LAUNCHER_SOURCES / "ModelSettingsWindow.swift").read_text(encoding="utf-8")
+        self.assertIn("confirmNonZdr", swift)
+        self.assertIn("providerに保持される可能性", swift)
+        # 追加は確認の応答を受けてから。分岐なしにselectedへ入れない。
+        self.assertIn("guard let self, response == .alertFirstButtonReturn else { return }", swift)
+        # 一覧の既定は安全側。
+        table = (LAUNCHER_SOURCES / "ModelCatalogTable.swift").read_text(encoding="utf-8")
+        self.assertIn("var zdrOnly = true", table)
+        self.assertIn('zdrOnly.state = .on', swift)
+
+    def test_settings_window_labels_usage_as_tokens_not_connections(self) -> None:
+        """OpenRouterが公開しているのはトークン総数で、接続数ではない。
+
+        「接続数」と名乗ると、利用者は別の指標だと思って読む。
+        """
+        swift = (LAUNCHER_SOURCES / "ModelSettingsWindow.swift").read_text(encoding="utf-8")
+        table = (LAUNCHER_SOURCES / "ModelCatalogTable.swift").read_text(encoding="utf-8")
+        self.assertIn("トークン利用量", swift)
+        self.assertNotIn("接続数", swift)
+        self.assertNotIn("接続数", table)
+        # トップ50圏外は0ではなくデータなし。
+        self.assertIn('return "—"', table)
+
     def test_desktop_launcher_gracefully_hands_off_from_the_exact_stock_app(self) -> None:
         """純正起動中は確認後に通常終了を待ち、強制終了せずhelperへ渡す。"""
         swift = launcher_swift()

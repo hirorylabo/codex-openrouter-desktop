@@ -90,9 +90,23 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         summaryLabel.stringValue = "表示モデル \(count)件"
         let defaultModel = snapshot.profile.defaultModel
         defaultLabel.stringValue = "既定モデル: \(names[defaultModel] ?? defaultModel)"
-        noticeLabel.stringValue = snapshot.editable
-            ? ""
-            : "OpenRouterモードが実行中です。ChatGPT終了後に変更できます。"
+
+        // ZDRなしのモデルが入っていることは、設定画面を開かなくても分かるようにする。
+        // 既定の安全性が下がっている状態を、管理画面に出さないまま常用させない。
+        let zdrLess = snapshot.available
+            .filter { !$0.zdrSupported && snapshot.profile.models.contains($0.id) }
+            .count
+        if !snapshot.editable {
+            noticeLabel.stringValue = "OpenRouterモードが実行中です。ChatGPT終了後に変更できます。"
+            noticeLabel.textColor = .secondaryLabelColor
+        } else if zdrLess > 0 {
+            noticeLabel.stringValue = "ZDRなしのモデルを\(zdrLess)件使用中です。"
+                + "そのモデルへ送った内容はproviderに保持される可能性があります。"
+            noticeLabel.textColor = .systemOrange
+        } else {
+            noticeLabel.stringValue = ""
+            noticeLabel.textColor = .secondaryLabelColor
+        }
         snapshotReady = true
         settingsButton.isEnabled = true
     }
