@@ -211,3 +211,11 @@ release build、`swiftc portable/launcher/app/*.swift`、`zsh -n` 3本 + 埋め�
 - `scripts/macos_installed_e2e.zsh` の launcher 2 cycle と、目視項目11件。ChatGPTの通常終了を
   含む対話操作なので利用者が実行する。
 - 実際に非ZDRモデルを足してOpenRouterへ疎通させる確認。
+
+### 既知の制限
+
+導入済みregistryは `price_refresh` / `catalog_refresh` の契約を、実体化した時点の
+同梱registryから写して持つ。以降のリリースでこの契約が変わっても、次にmodelを足すまで
+古い契約のまま残る。契約は安定しているので当面は許容し、必要になったらupgrade側で
+非modelsキーだけを差し替える。同じ理由で、同梱registryの説明文や価格を直しても、
+既にmodelを足した利用者へは次の追加操作まで届かない。
