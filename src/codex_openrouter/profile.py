@@ -46,9 +46,11 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def resolve_profile(registry_path: Path, profile_path: Path) -> ResolvedProfile:
-    registry_document = _load_json(registry_path)
-    profile_document = _load_json(profile_path)
+def _resolve(
+    registry_document: dict[str, Any],
+    profile_document: dict[str, Any],
+    fallback_name: str,
+) -> ResolvedProfile:
     if registry_document.get("schema_version") != 1:
         raise ProfileError("未対応のmodel registry schemaです")
     if profile_document.get("schema_version") != 1:
@@ -72,19 +74,64 @@ def resolve_profile(registry_path: Path, profile_path: Path) -> ResolvedProfile:
     if default_model not in models:
         raise ProfileError("default_modelはprofile.models内から選択してください")
 
-    name = profile_document.get("name", profile_path.stem)
+    name = profile_document.get("name", fallback_name)
     if not isinstance(name, str) or not name.strip():
         raise ProfileError("profile.nameは空でない文字列である必要があります")
     default_effort = registry[default_model].get("default_effort")
     if default_effort is not None and not isinstance(default_effort, str):
         raise ProfileError(f"default effortが不正です: {default_model}")
+    # 並び順の出所はregistryだけにする。profileやUIが順序を持つと、同じ選択でも
+    # digestとpicker priorityが揺れる。
+    selected = set(models)
+    ordered = tuple(model for model in registry if model in selected)
     return ResolvedProfile(
         name=name.strip(),
-        models=tuple(models),
+        models=ordered,
         default_model=default_model,
         default_effort=default_effort,
-        registry={model: registry[model] for model in models},
+        registry={model: registry[model] for model in ordered},
     )
+
+
+def resolve_profile(registry_path: Path, profile_path: Path) -> ResolvedProfile:
+    return _resolve(
+        _load_json(registry_path), _load_json(profile_path), profile_path.stem
+    )
+
+
+# 設定画面から変更できるのはこの3keyだけ。表示名・reasoning effort・並び順は
+# registryが持ち、入力経路を持たない。
+APPLY_KEYS = frozenset({"schema_version", "models", "default_model"})
+
+
+def parse_apply_payload(raw: str) -> dict[str, Any]:
+    """設定画面が送るapply入力を、解決する前に構文だけ検証する。"""
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProfileError(f"applyの入力がJSONではありません: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ProfileError("applyの入力はJSON objectである必要があります")
+    unexpected = sorted(set(document) - APPLY_KEYS)
+    if unexpected:
+        raise ProfileError(f"applyで変更できない項目です: {', '.join(unexpected)}")
+    return document
+
+
+def resolve_apply_payload(
+    registry_path: Path, payload: dict[str, Any], *, name: str
+) -> ResolvedProfile:
+    """apply入力をinstalled registryへ突き合わせて解決する。
+
+    profile nameは既存のものを引き継ぐ。UIはモデル集合と既定モデルだけを決める。
+    """
+    document = {
+        "schema_version": payload.get("schema_version"),
+        "name": name,
+        "models": payload.get("models"),
+        "default_model": payload.get("default_model"),
+    }
+    return _resolve(_load_json(registry_path), document, name)
 
 
 def select_profile_path(

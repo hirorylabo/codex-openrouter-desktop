@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from typing import Callable, Iterable
 
+from .app import write_json
+
 
 class PromotionError(RuntimeError):
     pass
@@ -25,11 +27,6 @@ def _copy(source: Path, target: Path) -> None:
             shutil.copytree(source, target, copy_function=shutil.copy2, symlinks=True)
     else:
         shutil.copy2(source, target)
-
-
-def _write_report(path: Path, document: dict) -> None:
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    path.chmod(0o600)
 
 
 def atomic_promote(
@@ -72,7 +69,7 @@ def atomic_promote(
             )
 
         report["result"] = "switching"
-        _write_report(backup_root / "promotion.json", report)
+        write_json(backup_root / "promotion.json", report)
         applied: list[tuple[Path, Path | None]] = []
         for incoming, target, original in prepared:
             if original is not None:
@@ -88,7 +85,7 @@ def atomic_promote(
 
         verify()
         report["result"] = "promoted-and-verified"
-        _write_report(backup_root / "promotion.json", report)
+        write_json(backup_root / "promotion.json", report)
     except Exception as error:
         for index, (target, original) in reversed(
             list(enumerate(locals().get("applied", [])))
@@ -102,7 +99,7 @@ def atomic_promote(
                 os.replace(incoming, failed / f"prepared-{index}")
         report["result"] = "failed-auto-rolled-back"
         report["error"] = f"{type(error).__name__}: {error}"
-        _write_report(backup_root / "promotion.json", report)
+        write_json(backup_root / "promotion.json", report)
         raise PromotionError(f"promotionに失敗し、自動rollbackしました: {error}") from error
 
 

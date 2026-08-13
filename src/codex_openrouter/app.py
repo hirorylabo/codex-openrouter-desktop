@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -79,6 +80,30 @@ class UserPaths:
     @property
     def guard_token(self) -> Path:
         return self.state_dir / "guard-token"
+
+    @property
+    def install_manifest(self) -> Path:
+        return self.state_dir / "install-manifest.json"
+
+
+def write_json(path: Path, document: dict) -> None:
+    """runtime stateのJSONを0600で書く。中身は秘密値を含まない前提。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def installed_workspace(paths: UserPaths) -> Path:
+    """install-manifestに記録されたworkspace。無ければ `~/Documents`。"""
+    receipt = paths.install_manifest
+    if receipt.is_file() and not receipt.is_symlink():
+        try:
+            saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            saved = None
+        if isinstance(saved, str) and Path(saved).is_dir():
+            return Path(saved)
+    return paths.home / "Documents"
 
 
 def sha256(path: Path) -> str:

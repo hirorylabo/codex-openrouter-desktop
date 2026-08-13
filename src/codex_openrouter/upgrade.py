@@ -23,7 +23,13 @@ import subprocess
 import tempfile
 
 from . import __version__
-from .app import UserPaths, assert_apple_silicon, detect_stock
+from .app import (
+    UserPaths,
+    assert_apple_silicon,
+    detect_stock,
+    installed_workspace,
+    write_json,
+)
 from .auth import CredentialStore
 from . import configblock
 from .lifecycle import LifecycleLock, LifecycleLockError
@@ -156,17 +162,24 @@ def render_template(source: Path, target: Path, home: Path, python: str) -> None
     target.chmod(0o755)
 
 
-def _write_json(path: Path, document: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+def launcher_sources(source_root: Path) -> list[str]:
+    """ランチャーappのSwift source一式。
+
+    ディレクトリを丸ごと見る。こことCIが個別のファイル名を持つと、片方だけ
+    増減して黙ってビルド対象から漏れる。
+    """
+    directory = source_root / "portable/launcher/app"
+    sources = sorted(str(path) for path in directory.glob("*.swift"))
+    if not sources:
+        raise UpgradeError(f"ランチャーのSwift sourceがありません: {directory}")
+    return sources
 
 
 def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: Path) -> None:
     """Desktopに置くランチャー専用バンドルを組み立てる。
 
-    純正appのcloneではない。事前処理をしてから /Applications/ChatGPT.app を
-    起動するだけの薄いバンドル。
+    純正appのcloneではない。管理画面を出し、利用者が押したときだけ事前処理をして
+    /Applications/ChatGPT.app を起動する薄いバンドル。
 
     workspaceとlog pathはInfo.plistへ焼き込む。Swift側に同じpathを書くと、
     Pythonが出所であるはずのpathが二重定義になり、v0.2.0のように片方だけ
@@ -196,7 +209,7 @@ def build_launcher(source_root: Path, target: Path, workspace: Path, log_path: P
         [
             "/usr/bin/xcrun",
             "swiftc",
-            str(source_root / "portable/launcher/CodexOpenRouterLauncher.swift"),
+            *launcher_sources(source_root),
             "-o",
             str(executable),
         ]
@@ -275,7 +288,7 @@ def promote_runtime(
             if commit_result.returncode == 0 and commit_result.stdout.strip()
             else "release-archive"
         )
-        _write_json(stage_state / "profile.json", profile.as_json())
+        write_json(stage_state / "profile.json", profile.as_json())
         state = State.load(paths.supervisor_state)
         if state.profile_digest != profile.digest:
             state.pending_default_model = True
@@ -284,7 +297,7 @@ def promote_runtime(
         state.guard_port = None
         state.guard_nonce = None
         state.save(stage_state / "supervisor.json")
-        _write_json(
+        write_json(
             stage_state / "install-manifest.json",
             manifest_document(
                 source_root,
@@ -317,7 +330,7 @@ def promote_runtime(
         replacements.extend(
             (
                 (stage_launcher, paths.desktop_launcher),
-                (stage_state / "install-manifest.json", paths.state_dir / "install-manifest.json"),
+                (stage_state / "install-manifest.json", paths.install_manifest),
                 (stage_state / "profile.json", paths.installed_profile),
                 (stage_state / "supervisor.json", paths.supervisor_state),
             )
@@ -382,14 +395,9 @@ def _upgrade_unlocked(
         if metadata.get("limit") is None:
             print("WARNING: API keyのspend limitが未設定です。")
 
-    workspace = paths.home / "Documents"
-    receipt = paths.state_dir / "install-manifest.json"
-    if receipt.is_file() and not receipt.is_symlink():
-        saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
-        if isinstance(saved, str) and Path(saved).is_dir():
-            workspace = Path(saved)
-
-    backup_root = promote_runtime(source_root, paths, stock, workspace, profile)
+    backup_root = promote_runtime(
+        source_root, paths, stock, installed_workspace(paths), profile
+    )
     print(f"UPGRADE: PASS v{__version__} mode=loopback-guard")
     print(f"rollback backup: {backup_root}")
     return 0
@@ -417,7 +425,7 @@ def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
     同じ内容で一度失敗したらskipする。壊れた作業中のツリーを掴んだとき、
     クリックのたびに十数秒払って同じ失敗を繰り返さないため。
     """
-    receipt = paths.state_dir / "install-manifest.json"
+    receipt = paths.install_manifest
     if not receipt.is_file() or receipt.is_symlink():
         return 0
     recorded = _selfupdate_state(receipt).get("source_root")
@@ -457,6 +465,6 @@ def auto_upgrade(paths: UserPaths, profile_argument: str | None = None) -> int:
     except Exception as error:  # 起動は止めない
         result = "failure"
         print(f"自動更新に失敗しました（起動は続行します）: {error}")
-    _write_json(state_path, {"schema_version": 1, "result": result, "digest": source_digest})
+    write_json(state_path, {"schema_version": 1, "result": result, "digest": source_digest})
     print(STATUS_LAUNCHING, flush=True)
     return 0

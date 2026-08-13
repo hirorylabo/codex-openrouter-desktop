@@ -10,13 +10,12 @@ verifyが落ちれば全targetが元へ戻る。
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import shutil
 import subprocess
 
 from . import __version__
-from .app import UserPaths, assert_apple_silicon, detect_stock
+from .app import UserPaths, assert_apple_silicon, detect_stock, installed_workspace
 from .auth import temporary_store
 from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
@@ -97,13 +96,8 @@ def _install_unlocked(
         finally:
             temporary.cleanup()
 
-    receipt = paths.state_dir / "install-manifest.json"
     if workspace is None:
-        workspace = paths.home / "Documents"
-        if receipt.is_file() and not receipt.is_symlink():
-            saved = json.loads(receipt.read_text(encoding="utf-8")).get("workspace")
-            if isinstance(saved, str) and Path(saved).is_dir():
-                workspace = Path(saved)
+        workspace = installed_workspace(paths)
     workspace.mkdir(parents=True, exist_ok=True)
     backup_root = promote_runtime(source_root, paths, stock, workspace, profile)
 

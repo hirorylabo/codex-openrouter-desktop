@@ -163,11 +163,20 @@ def validate(
             raise CatalogError(f"{slug} がpickerに出ません: visibility={entry.get('visibility')}")
 
 
+def previous_path(path: Path) -> Path:
+    """`write` が残す1世代前のcatalog path。
+
+    profile変更時はこれも一緒に消す。片方だけ残すと、次回起動で組み直したcatalogと
+    profile外モデルを含む世代が同じディレクトリに並ぶ。
+    """
+    return path.with_suffix(path.suffix + ".previous")
+
+
 def write(document: dict, path: Path) -> Path:
     """検証済みcatalogを原子的に置換し、1世代前を残す。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        previous = path.with_suffix(path.suffix + ".previous")
+        previous = previous_path(path)
         previous.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

@@ -32,7 +32,7 @@ from .profile import ResolvedProfile, resolve_profile
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 class SupervisorError(RuntimeError):
@@ -53,6 +53,9 @@ class State:
     pending_default_model: bool = False
     guard_port: int | None = None
     guard_nonce: str | None = None
+    # 現在のcatalogがどのprofileから作られたか。build更新だけでなくprofile変更でも
+    # 組み直すために持つ。
+    catalog_profile_digest: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "State":
@@ -198,12 +201,18 @@ class Supervisor:
 
     # [3] update追従 --------------------------------------------------------
     def refresh_catalog_if_needed(self, force: bool = False) -> bool:
-        """version/buildが変わったときだけcatalogを組み直す。
+        """version/buildかprofileが変わったときだけcatalogを組み直す。
 
         ASAR hashは見ない。223MBのハッシュを毎回走らせないため。
+
+        profile digestも見るのは、pickerとguard・watcher・doctorが必ず同じ集合を
+        指すため。設定画面のapplyは旧catalogを消すのでここは素通りするが、
+        `upgrade --profile` のようにcatalogを消さない経路でも自己回復する。
         """
         version, build = stock_build_id(self.paths.stock_app)
-        unchanged = (version, build) == (self.state.version, self.state.build)
+        unchanged = (version, build) == (self.state.version, self.state.build) and (
+            self.state.catalog_profile_digest == self.profile.digest
+        )
         if unchanged and self.paths.composite_catalog.is_file() and not force:
             return False
         catalog.generate(
@@ -214,6 +223,7 @@ class Supervisor:
             model_ids=self.profile.models,
         )
         self.state.version, self.state.build = version, build
+        self.state.catalog_profile_digest = self.profile.digest
         self.state.save(self.state_path)
         return True
 

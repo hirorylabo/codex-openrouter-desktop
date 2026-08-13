@@ -80,10 +80,40 @@ wait_launcher_exit() {
   fail "Desktop launcherの終了を${WAIT_SECONDS}秒以内に確認できませんでした"
 }
 
+check_profile_surface() {
+  print -- "\n=== 設定画面が読む profile document ==="
+  local document
+  document="$("$CLI" profile show --json)" || fail "profile show --jsonに失敗しました"
+  print -r -- "$document" | /usr/bin/python3 -c '
+import json, sys
+document = json.load(sys.stdin)
+assert document["schema_version"] == 1, document["schema_version"]
+assert document["profile"]["models"], "選択モデルが空です"
+assert document["profile"]["default_model"] in document["profile"]["models"]
+assert document["available"], "registryが空です"
+' || fail "profile documentが契約を満たしません"
+  # 設定画面には秘密値を出さない。出所であるdocumentの時点で持たせない。
+  case "$document" in
+    *sk-or-*) fail "profile documentに鍵が含まれています" ;;
+  esac
+  print -- "[PASS] profile show: schema・選択・registryを確認（秘密値なし）"
+}
+
+manual_checklist() {
+  print -- "\n=== 実機で目視確認する項目 ==="
+  print -- "  1. 管理画面に 表示モデル数・既定モデル・workspace が出る"
+  print -- "  2. ⌘, とAppメニューの「設定…」でモデル設定画面が開く"
+  print -- "  3. Desktop launcherへfolderをdropするとworkspaceだけ変わり、ChatGPTは起動しない"
+  print -- "  4. 純正ChatGPT起動中にクリックすると切替確認が出る"
+  print -- "  5. 設定画面のどこにもAPI keyが表示されない"
+  print -- "  6. 終了後に codex-openrouter doctor が純正app無改変を報告する"
+}
+
 run_cycle() {
   local cycle="$1"
   print -- "\n=== launcher cycle ${cycle}/2 ==="
-  print -- "launcherを起動します。確認画面が出た場合は安全なモード切替を選択してください。"
+  print -- "launcherを起動します。管理画面の「OpenRouterで起動」を押してください。"
+  print -- "純正ChatGPTが起動中の場合は、確認画面で安全なモード切替を選択してください。"
   /usr/bin/open "$LAUNCHER"
   wait_active
   doctor || fail "cycle ${cycle}: active doctorに失敗しました"
@@ -103,6 +133,8 @@ run_cycle() {
 [[ -x "$STOCK_EXECUTABLE" ]] || fail "純正ChatGPT executableがありません"
 [[ "$WAIT_SECONDS" == <-> && "$WAIT_SECONDS" -gt 0 ]] || fail "timeoutは正の整数にしてください"
 
+check_profile_surface
+manual_checklist
 run_cycle 1
 run_cycle 2
 

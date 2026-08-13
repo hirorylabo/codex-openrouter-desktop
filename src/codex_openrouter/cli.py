@@ -344,6 +344,20 @@ def compact_legacy_home(home: Path) -> str:
     return _human(freed)
 
 
+def profile_command(args: argparse.Namespace) -> int:
+    """設定画面の読み書き口。SwiftはこのJSONだけを見る。"""
+    from . import settings
+
+    paths = UserPaths.current()
+    registry_path = root() / "models/registry.json"
+    if args.profile_action == "show":
+        document = settings.show_document(paths, registry_path)
+    else:
+        document = settings.apply_payload(paths, registry_path, sys.stdin.read())
+    print(json.dumps(document, ensure_ascii=False, indent=2))
+    return 0
+
+
 def guard_log_command(args: argparse.Namespace) -> int:
     """guardが弾いたmodelを集計する（巻き込みスキャン）。
 
@@ -431,6 +445,17 @@ def build_parser() -> argparse.ArgumentParser:
                          help="旧 ~/.codex-openrouter を圧縮せずそのまま残す")
     migrate.set_defaults(func=migrate_command)
 
+    # 出力形式のフラグは必須にする。将来ここへ人間向け表示を足したときに、
+    # 既存のランチャーが黙って別形式を読み始めることが無いようにするため。
+    profile_parser = subcommands.add_parser("profile")
+    profile_actions = profile_parser.add_subparsers(dest="profile_action", required=True)
+    profile_show = profile_actions.add_parser("show")
+    profile_show.add_argument("--json", action="store_true", required=True)
+    profile_show.set_defaults(func=profile_command)
+    profile_apply = profile_actions.add_parser("apply")
+    profile_apply.add_argument("--stdin-json", action="store_true", required=True)
+    profile_apply.set_defaults(func=profile_command)
+
     guard_log = subcommands.add_parser("guard-log")
     guard_log.add_argument("--clear", action="store_true")
     guard_log.set_defaults(func=guard_log_command)
@@ -462,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     from .install import InstallError
     from .lifecycle import LifecycleLockError
     from .promotion import PromotionError
+    from .settings import SettingsError
     from .supervisor import SupervisorError
     from .upgrade import UpgradeError
 
@@ -478,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         ProfileError,
         ProcessError,
         PromotionError,
+        SettingsError,
         SupervisorError,
         UpgradeError,
         CliError,

@@ -11,11 +11,19 @@ import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER_SOURCES = ROOT / "portable/launcher/app"
 
 
 from codex_openrouter import doctor as doctor_module
 from codex_openrouter import upgrade as upgrade_module
 from scripts import macos_live_e2e as live_e2e
+
+
+def launcher_swift() -> str:
+    """ランチャーappのSwift全文。ファイル分割で検査が素通りしないよう束ねて見る。"""
+    sources = sorted(LAUNCHER_SOURCES.glob("*.swift"))
+    assert sources, f"ランチャーのSwift sourceがありません: {LAUNCHER_SOURCES}"
+    return "\n".join(path.read_text(encoding="utf-8") for path in sources)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -203,9 +211,7 @@ class RepositoryTests(unittest.TestCase):
         削除済みpathを指したままになっていた。CIは swiftc のコンパイルしか見ないので
         落ちず、直前に足した path 実在テストは src/**/*.py しか走査していなかった。
         """
-        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
-            encoding="utf-8"
-        )
+        swift = launcher_swift()
         for retired in ("ChatGPT OpenRouter.app", ".codex-openrouter"):
             self.assertNotIn(retired, swift)
         # pathの出所はPython側（UserPaths）。Swiftはplist経由で受け取るだけ。
@@ -220,17 +226,87 @@ class RepositoryTests(unittest.TestCase):
 
     def test_progress_sentinels_match_between_swift_and_python(self) -> None:
         """HUDの出し入れは文字列の一致が全て。片方だけ変えると黙って出なくなる。"""
-        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
-            encoding="utf-8"
-        )
+        swift = launcher_swift()
         for sentinel in (upgrade_module.STATUS_UPDATING, upgrade_module.STATUS_LAUNCHING):
             self.assertIn(f'"{sentinel}"', swift)
 
+    def test_build_and_ci_compile_the_whole_launcher_source_directory(self) -> None:
+        """ビルド側とCIが同じディレクトリを丸ごと見ること。
+
+        ファイル名を個別に列挙すると、片方だけ増減して黙って対象から漏れる。
+        `main.swift` が1つだけあることも見る。Swiftはtop-level codeをそこにしか
+        許さないので、2つあるとリンクが壊れる。
+        """
+        upgrade = (ROOT / "src/codex_openrouter/upgrade.py").read_text(encoding="utf-8")
+        self.assertIn('"portable/launcher/app"', upgrade)
+        self.assertIn('glob("*.swift")', upgrade)
+        self.assertIn("*launcher_sources(source_root)", upgrade)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("portable/launcher/app/*.swift", workflow)
+        self.assertTrue((LAUNCHER_SOURCES / "main.swift").is_file())
+        top_level = [
+            path.name
+            for path in LAUNCHER_SOURCES.glob("*.swift")
+            if "NSApplication.shared" in path.read_text(encoding="utf-8")
+            and "application.run()" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(["main.swift"], top_level)
+
+    def test_launcher_is_a_regular_app_with_a_settings_entry(self) -> None:
+        """管理ランチャーはDockとAppメニューを持つ通常app。常駐daemonにはしない。"""
+        info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
+        self.assertNotIn("LSUIElement", info)
+        swift = launcher_swift()
+        self.assertIn("NSApplication.shared.mainMenu = mainMenu", swift)
+        self.assertIn('withTitle: "設定…", action: #selector(openSettings(_:)), keyEquivalent: ","', swift)
+        # 画面を閉じたら終わる。OpenRouterセッション終了でも終わる。
+        self.assertIn("func applicationShouldTerminateAfterLastWindowClosed", swift)
+        self.assertIn("NSApplication.shared.terminate(nil)", swift)
+
+    def test_launcher_shows_the_panel_before_starting_chatgpt(self) -> None:
+        """起動もfolder dropも管理画面を出すだけ。ChatGPTはボタンを押すまで動かない。"""
+        swift = launcher_swift()
+        self.assertIn("adopt(workspace: path)", swift)
+        self.assertIn("func startOpenRouter()", swift)
+        self.assertIn('ActionButton(title: "OpenRouterで起動"', swift)
+        self.assertIn('ActionButton(title: "モデル設定…"', swift)
+        # 旧実装は起動直後に自動でhelperを起動していた。
+        self.assertNotIn("if !self.receivedWorkspace", swift)
+
+    def test_launcher_delegates_every_profile_decision_to_the_cli(self) -> None:
+        """profile・Keychain・Guardrailの判断をSwiftへ複製しない。"""
+        swift = launcher_swift()
+        self.assertIn('["profile", "show", "--json"]', swift)
+        self.assertIn('["profile", "apply", "--stdin-json"]', swift)
+        for duplicated in (
+            "sk-or-",
+            "registry.json",
+            "profiles/default.json",
+            "SecItem",
+            "kSecClass",
+            "openrouter.ai/api",
+            "supervisor.json",
+        ):
+            self.assertNotIn(duplicated, swift)
+
+    def test_settings_window_requires_one_model_and_an_explicit_default(self) -> None:
+        """空集合と「既定を外したまま保存」をUI側でも止める。"""
+        swift = (LAUNCHER_SOURCES / "ModelSettingsWindow.swift").read_text(encoding="utf-8")
+        self.assertIn("最低1モデルを選択してください。", swift)
+        self.assertIn("既定モデルを選び直してください。", swift)
+        self.assertIn("ChatGPT終了後に変更できます。", swift)
+        self.assertIn("次回のOpenRouter起動から反映されます。", swift)
+        self.assertIn('ActionButton(title: "OpenRouter Guardrailを開く"', swift)
+        self.assertIn('ActionButton(title: "検証して保存"', swift)
+        self.assertIn(
+            "let ready = !selected.isEmpty && defaultModel.map(selected.contains) == true", swift
+        )
+        # 既定を外したら黙って他へ寄せない。
+        self.assertIn("defaultModel = nil", swift)
+
     def test_desktop_launcher_gracefully_hands_off_from_the_exact_stock_app(self) -> None:
         """純正起動中は確認後に通常終了を待ち、強制終了せずhelperへ渡す。"""
-        swift = (ROOT / "portable/launcher/CodexOpenRouterLauncher.swift").read_text(
-            encoding="utf-8"
-        )
+        swift = launcher_swift()
         self.assertIn('URL(fileURLWithPath: "/Applications/ChatGPT.app")', swift)
         self.assertIn("$0.bundleURL?.standardizedFileURL == stockAppURL", swift)
         self.assertIn("終了してOpenRouterモードへ切り替える", swift)
@@ -252,6 +328,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("codex_openrouter.processes", source)
         self.assertNotIn("pgrep", source)
         self.assertNotIn("codex-openrouter:catalog", source)
+        # 管理画面が入り、クリックだけでは起動しなくなった。
+        self.assertIn("profile show --json", source)
+        self.assertIn("OpenRouterで起動", source)
+        self.assertIn("manual_checklist", source)
 
     def test_live_e2e_removes_auth_copy_even_when_cleanup_raises(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
