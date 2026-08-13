@@ -203,8 +203,8 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
                 contextWindow: option.contextWindow,
                 efforts: option.efforts,
                 defaultEffort: option.defaultEffort,
-                zdrSupported: option.zdrSupported,
-                trainsOnData: option.zdrSupported ? false : nil,
+                zdrSupported: option.zdrSupported ?? true,
+                trainsOnData: (option.zdrSupported ?? true) ? false : nil,
                 free: false,
                 headline: ProfileBridge.CatalogEntry.Price(input: "—", output: "—", cacheRead: nil),
                 usageTokens: nil

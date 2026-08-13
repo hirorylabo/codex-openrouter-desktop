@@ -94,7 +94,7 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         // ZDRなしのモデルが入っていることは、設定画面を開かなくても分かるようにする。
         // 既定の安全性が下がっている状態を、管理画面に出さないまま常用させない。
         let zdrLess = snapshot.available
-            .filter { !$0.zdrSupported && snapshot.profile.models.contains($0.id) }
+            .filter { $0.zdrSupported == false && snapshot.profile.models.contains($0.id) }
             .count
         if !snapshot.editable {
             noticeLabel.stringValue = "OpenRouterモードが実行中です。ChatGPT終了後に変更できます。"

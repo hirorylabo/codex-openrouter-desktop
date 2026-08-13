@@ -20,7 +20,9 @@ enum ProfileBridge {
         let efforts: [String]
         let defaultEffort: String?
         let contextWindow: Int?
-        let zdrSupported: Bool
+        /// 省略時は安全側のtrue。非必須で読むのは、古いCLIと新しいランチャーが
+        /// 一瞬でも噛み合ったときに、画面ごと「応答を解釈できません」で潰さないため。
+        let zdrSupported: Bool?
     }
 
     struct Selection: Decodable {
