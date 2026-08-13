@@ -27,7 +27,7 @@ from . import catalog as catalog_module
 from . import configblock
 from .app import UserPaths
 from .auth import CredentialStore
-from .profile import installed_profile
+from .profile import active_registry, installed_profile
 from .supervisor import CATALOG_BLOCK, PROVIDER_BLOCK, State
 
 ENDPOINT = "https://openrouter.ai/api/v1/responses"
@@ -455,7 +455,12 @@ def run(
     runtime: bool = False,
     secret_scan: bool = False,
 ) -> int:
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
+    # supervisorと同じ正本を見る。同梱registryのまま読むと、設定画面で足した
+    # modelを「OpenRouterのslug」と認識できず、純正起動時にcatalogに無いmodelを
+    # 指したままでもPASSしてしまう。
+    registry = json.loads(
+        active_registry(registry_path, paths).read_text(encoding="utf-8")
+    )["models"]
     _profile_path, profile = installed_profile(registry_path, paths)
     registry_models = profile.registry
     doctor = Doctor()

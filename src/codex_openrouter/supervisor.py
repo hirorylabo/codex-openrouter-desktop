@@ -27,7 +27,7 @@ from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
 from .processes import process_pids
-from .profile import ResolvedProfile, installed_profile
+from .profile import ResolvedProfile, active_registry, installed_profile
 
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
@@ -115,10 +115,13 @@ class Supervisor:
         workspace: Path | None = None,
     ):
         self.paths = paths
-        self.registry_path = registry_path
+        # 正本は導入済みregistryがあればそちら。同梱registryのまま読むと、
+        # 設定画面で足したmodelがcatalog生成でKeyErrorになり、shutdown時の
+        # native復帰でも「OpenRouterのmodelだと気づけない」状態になる。
+        self.registry_path = active_registry(registry_path, paths)
         self.port = port
         self.workspace = workspace
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))["models"]
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))["models"]
         self.all_registry_models = frozenset(registry)
         if profile is None:
             # 呼び出し側はふつう解決済みprofileを渡す。渡らなかった場合も

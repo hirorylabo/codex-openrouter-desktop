@@ -526,6 +526,32 @@ class ModelAdditionTests(SettingsTestCase):
         for slug in ALL_MODELS:
             self.assertTrue(installed["models"][slug]["zdr_supported"])
 
+    def test_supervisor_and_catalog_read_the_grown_registry(self) -> None:
+        """追加したmodelを同梱registryしか知らない経路へ渡さないこと。
+
+        `catalog.generate` は `all_models[model]` を引くので、同梱registryのままだと
+        追加modelでKeyErrorになり、pickerに一切出せない。shutdown時のnative復帰も
+        「これはOpenRouterのmodelだ」と気づけなくなり、catalogを外したconfigに
+        OpenRouter slugが残る。
+        """
+        from codex_openrouter import catalog as catalog_module
+        from codex_openrouter.supervisor import Supervisor
+
+        self.add([*ALL_MODELS, self.NEW], self.NEW)
+
+        supervisor = Supervisor(self.paths, REGISTRY)
+        self.assertEqual(self.paths.installed_registry, supervisor.registry_path)
+        self.assertIn(self.NEW, supervisor.all_registry_models)
+
+        # catalog生成が追加modelを引けること（bundled環境ではKeyErrorになっていた）。
+        registry = json.loads(supervisor.registry_path.read_text(encoding="utf-8"))
+        self.assertIn(self.NEW, registry["models"])
+        # 価格契約は同梱registryから引き継がれる。
+        self.assertIn("price_refresh", registry)
+        self.assertIn("catalog_refresh", registry)
+        prices = catalog_module.pricing.fallback_prices(registry)
+        self.assertIn(self.NEW, prices["headline"])
+
     def test_show_reports_the_grown_registry(self) -> None:
         self.add([*ALL_MODELS, self.NEW], self.NEW)
         document = settings.show_document(self.paths, REGISTRY)
