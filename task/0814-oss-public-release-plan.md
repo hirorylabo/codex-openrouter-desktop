@@ -454,7 +454,8 @@ RELEASE_NOTES.mdがv0.2.0の破壊的変更理由として挙げているドリ�
 「管理画面の『OpenRouterで起動』を押してください」と表示し、L58で`WAIT_SECONDS`（既定180秒）
 以内にactive状態を検知できなければfailする。自動実行ではcycle 1で
 `[FAIL] active状態を180秒以内に確認できませんでした` となった。**これは製品の欠陥ではなく、
-GUIクリックの担い手がいなかったことによるタイムアウトである。**
+GUIクリックの担い手がいなかったことによるタイムアウトである。**（後述のとおり、そもそも
+Macがロックされており、解錠されたデスクトップセッションが無かった。）
 
 中断後に`doctor`で状態を確認し、catalog blockなし・model native・guard tokenなし・純正app無改変で
 `RESULT: PASS`。汚れは残っていない。スクリプトが起動したlauncherプロセスと、自分の実行が残した
@@ -465,10 +466,44 @@ crashpad handler 2件は終了させた。
 - `[PASS] profile show: schema・選択・registryを確認（秘密値なし）`
 - `[PASS] models list: 候補・価格・ZDR判定を確認（秘密値なし）`（候補328件 / ZDR 175件 / 利用量あり）
 
-残りは利用者がGUIで確認する必要がある。
+#### GUI自動化の試行と、確定した1項目
 
+残りをAppleScript（System Events）のUI自動化で埋められるか試した。結論は**ロック画面により不可**。
+
+試行の途中、launcherを起動した直後に管理画面のaccessibility treeを取得できた。
+
+```
+static text "表示モデル 5件"
+static text "既定モデル: DeepSeek V4 Flash 0731"
+static text "workspace: ~/Documents"
+button     "モデル設定…"
+button     "OpenRouterで起動"
+```
+
+（workspaceの実値は絶対パスだったが、`secret_scan.py`の`personal absolute path`検査に
+かかるため`~`表記へ置き換えて引用している。）
+
+これにより **「管理画面に表示モデル数・既定モデル・workspaceが出る」は確定**（目視ではなく
+accessibility tree による確認なので、目視より強い証拠になる）。値も`doctor`の選択5モデル、
+live E2Eの「pickerにOpenRouterモデルが5件並ぶ」と一致する。tree内にAPI key文字列は無い。
+「モデル設定…」「OpenRouterで起動」の両ボタンが存在することも確認できた。
+
+その後、Macが**ロック画面**（Touch IDまたはパスワード入力待ち）に入り、以降は
+`count of windows` が常に`0`を返すようになった。ロック中はwindowを生成・検査できない。
+解錠には利用者本人のTouch IDかパスワードが必要で、これは本計画の「password、Cookie、
+認証コード、API keyを表示・読み取りしない」に該当するため試行しない。
+
+**GUI項目はツールの制約ではなく、解錠されたデスクトップセッションが無いことで止まっている。**
+利用者がMacを解錠していれば、同じUI自動化で残りも機械的に確認できる見込みがある。
+
+起動したlauncherプロセスと、確認に使ったスクリーンショットは削除済み。中断後の`doctor`は
+`RESULT: PASS`で状態は汚れていない。
+
+#### 残りの未確認項目
+
+- [x] 管理画面に表示モデル数・既定モデル・workspaceが出る（accessibility treeで確認済み）
 - [ ] installed launcherが2 cycleともactive/inactiveへ正常遷移する
-- [ ] 管理画面、`⌘,`、folder drop、純正appからのhandoffが期待どおり
+- [ ] `⌘,`、folder drop、純正appからのhandoffが期待どおり
 - [ ] 設定画面にAPI keyが出ない
 - [ ] 価格・公開日・7dトークン量の列とsort/filterが動く
 - [ ] `ZDRのみ`が既定ONで、選択済みモデルがfilterで消えない
