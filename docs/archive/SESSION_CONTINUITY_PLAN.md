@@ -89,7 +89,7 @@ provider(model) = model ∈ OR5 ? "openrouter" : "openai"
 2. visibility patchは `authMethod` 反転をやめ、OR5を `additionalAvailableModels` 経由で出す形を先に試す。成立すればanchorは3→2になる。不成立ならprovider別述語（nativeは`availableModels`、customは`!hidden`）にする
 3. composite catalog生成を `codex-openrouter-refresh` 側に追加する
 4. config marker blockの適用・削除・冪等性を実装する
-5. `render_provider_mapping` の `default_provider` と [patch_candidate.py:73](portable/patcher/patch_candidate.py:73) のOpenRouter専用guardを更新する（実質2箇所）
+5. `render_provider_mapping` の `default_provider` と `portable/patcher/patch_candidate.py:73` のOpenRouter専用guardを更新する（実質2箇所）
 6. markerを `__codexUnifiedRouterBuild6396PatchV1` に更新する
 
 **Phase 2: candidate実機検証（6件）**

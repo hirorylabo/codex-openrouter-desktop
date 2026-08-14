@@ -2,8 +2,8 @@
 
 作成日: 2026-08-14 / 基準commit: `d22840c` / 対象: `hirorylabo/codex-openrouter-desktop`
 
-Status: **Phase 0〜6 完了（2026-08-14）。`v0.2.0` prereleaseを公開し、checksumとattestationを
-再取得して検証済み。残るのはPhase 7（任意）とDependabot PR 3本の判断のみ。**
+Status: **完了（2026-08-14）。Phase 0〜7 すべて実施。`v0.2.0` prereleaseを公開し、checksumと
+attestationを再取得して検証済み。残るのはDependabot PR 3本の判断のみ。**
 基準commitは`d22840c`から`e1eacc4`（PR #5 squash merge）へ進んだ。
 
 ## 結論
@@ -346,7 +346,7 @@ tag/release失敗時はpublic tagをforce移動・再利用しない。transient
 - [x] Phase 4 CodeQL・ruleset PASS
 - [x] Phase 5 実機リリースゲート PASS
 - [x] Phase 6 v0.2.0 release・assets・attestation PASS
-- [ ] Phase 7 文書archive整理（任意）
+- [x] Phase 7 文書archive整理（任意）
 
 ### Phase 0 preflight（2026-08-14）
 
@@ -647,7 +647,78 @@ release workflowのpermissionは今回のPRで最小化した構成（top-level 
 `release` jobにのみ`contents: write` / `id-token: write` / `attestations: write`）で動作しており、
 attestation発行に支障がないことも確認できた。
 
+### Phase 7 文書archive整理（2026-08-14、リリース後の別PR）
+
+`build_release.py`の`FILES`は明示allowlist、`DIRECTORIES`は
+`models / portable / profiles / src / tests / scripts`であり、`task/`とroot直下の計画`.md`は
+**リリース同梱物に入っていない**。したがって本整理はrelease中立で、`build_release.py`の変更も不要。
+
+4ファイルを`docs/archive/`へ移動した（4件ともgitがrenameとして認識し履歴が保たれる）。
+
+| 移動前 | 移動後 |
+| --- | --- |
+| `LOOPBACK_ROUTER_PLAN.md` | `docs/archive/LOOPBACK_ROUTER_PLAN.md` |
+| `SESSION_CONTINUITY_PLAN.md` | `docs/archive/SESSION_CONTINUITY_PLAN.md` |
+| `SESSION_CONTINUITY_PLAN.full.md` | `docs/archive/SESSION_CONTINUITY_PLAN.full.md` |
+| `task/PLAN (6).md` | `docs/archive/model-management-ux-plan.md` |
+
+`PLAN (6).md`の改名先は、本文の見出し「OpenRouterモデル管理UX・実装計画」と、
+`task/006-model-management-launcher.md`がその実装である関係から命名した。削除はしていない。
+
+参照の更新は2箇所。
+
+- `task/002-loopback-router-plan-d.md` の関連リンク2本を`../docs/archive/`配下へ向け直した。
+- `task/006-model-management-launcher.md` の冒頭を、素のパス表記から
+  `docs/archive/model-management-ux-plan.md` への相対リンクへ変更した。
+
+移動により壊れたリンクを機械検査で洗い出し、2件見つかった。
+
+1. `LOOPBACK_ROUTER_PLAN.md` の `models/registry.json` — 参照先は実在し、rootからの相対表記が
+   移動でずれただけ。`../../models/registry.json` へ修正した。
+2. `SESSION_CONTINUITY_PLAN.md` の `portable/patcher/patch_candidate.py:73` — **移動とは無関係の
+   既存の壊れたリンク**。`portable/patcher/`は`3bae9ae`（ASARパッチ方式の撤去）でディレクトリごと
+   削除されており、`origin/main`時点でも同じく解決不能だった。参照先が復活することはないため、
+   リンクを外してinline codeへ落とした。
+
+最終確認として、`git ls-files '*.md'` と移動後の4ファイルを対象に相対リンク20件を検査し、
+**解決できないものは0件**。移動した4ファイルへの古いpath参照が残っていないことも確認した。
+`task/0814-oss-public-release-plan.md`内に残る`task/PLAN (6).md`の記述は、本計画自身が
+Phase 2.6とPhase 7で「何をするか」を説明している地の文であり、リンクではないため維持している。
+
 ### 未処理・次の判断事項
+
+#### 発見: `build_release.py` がローカル実行時に `.DS_Store` を同梱する
+
+Phase 7の検証中、移動が実行物へ影響しないことを確かめるためローカルで
+`build_release.py`を回し、公開済みv0.2.0 archiveと同梱ファイル集合を突き合わせて見つけた。
+
+- 公開済み（CIビルド）: 80 entry
+- ローカルビルド: 85 entry
+
+差分5件は `portable/.DS_Store`, `scripts/.DS_Store`, `src/.DS_Store`, `tests/.DS_Store` と、
+空ディレクトリ `portable/tests/`。
+
+原因は`build_release.py`が**gitではなくファイルシステムを`rglob`で走査**していること。
+`.DS_Store`は`.gitignore`（2〜3行目）で除外されているのでcommitされることはなく、
+CIはfresh cloneなのでリリース成果物は現状clean。**公開済みのv0.2.0に混入はない**。
+しかし`EXCLUDED_PARTS`は`node_modules / __pycache__ / .generated / .test-output / dist`だけで
+`.DS_Store`を含まないため、macOS上でローカルリリースを切ると配布物へ入る。
+
+影響:
+
+- 計画やCONTRIBUTINGが案内するローカル検証手順が、CIと異なるarchiveを生成する。
+- `.DS_Store`はFinderのメタデータで、同一ディレクトリ内の項目名を含みうる。
+  「配布物に不要なものを含めない」という本プロジェクトの主張と整合しない。
+- `secret_scan.py`にも`.DS_Store`の扱いはない。
+
+想定される直し方（未着手。別PRの判断事項）:
+
+1. `EXCLUDED_PARTS`へ`.DS_Store`を足す（最小修正だが、他のOS固有ゴミには追随しない）。
+2. 収集元を`git ls-files`ベースへ変える（`.gitignore`と一致し、空ディレクトリ問題も同時に解消）。
+3. archive生成後に`secret_scan.py --archive`側でOS固有ファイルを検出して落とす。
+
+本リリースの停止条件ではないため、v0.2.0公開後の別PRとして扱う。
+
 
 **Dependabot PR 3本が open**（有効化直後に自動生成、いずれもCI green・SHA固定とversion comment維持）。
 
