@@ -3,6 +3,10 @@
 > [!WARNING]
 > **非公式・実験的なworkaroundです。OpenAIおよびOpenRouterの公認・提携製品ではありません。** 初版はApple Silicon macOS専用です。ChatGPT.appの更新で停止する可能性があり、無保証です。OpenAI、ChatGPT、Codex、OpenRouterおよび各モデル名は各権利者の商標です。
 
+[![CI](https://github.com/hirorylabo/codex-openrouter-desktop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hirorylabo/codex-openrouter-desktop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/hirorylabo/codex-openrouter-desktop?include_prereleases&sort=semver)](https://github.com/hirorylabo/codex-openrouter-desktop/releases)
+
 公式の署名済み`/Applications/ChatGPT.app`を**一切変更せず**、`~/.codex/config.toml`のmarker blockとローカルguardだけで、純正appのモデルピッカーにOpenRouterモデルを並べるCLIです。ASARパッチもcloneも作りません。`ChatGPT.app`、ASAR、API key、Cookie、履歴、userData、ログは配布物にもrepositoryにも含みません。
 
 Desktopの`Codex OpenRouter.app`は小型の管理ランチャーです。開くと表示モデル数・既定モデル・workspaceを示す画面が出て、「OpenRouterで起動」を押したときだけ事前処理のうえ純正appが立ち上がり、pickerにnativeとOpenRouterが両方並びます。終了時にcatalogを外すので、`ChatGPT.app`を直接起動したときはvanillaのままです。
