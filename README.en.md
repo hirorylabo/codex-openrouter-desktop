@@ -3,6 +3,10 @@
 > [!WARNING]
 > **This is an unofficial, experimental workaround. It is not endorsed by or affiliated with OpenAI or OpenRouter.** The first release supports Apple Silicon macOS only. A ChatGPT.app update may stop it from working, and the software is provided without warranty. OpenAI, ChatGPT, Codex, OpenRouter, and model names are trademarks of their respective owners.
 
+[![CI](https://github.com/hirorylabo/codex-openrouter-desktop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hirorylabo/codex-openrouter-desktop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/hirorylabo/codex-openrouter-desktop?include_prereleases&sort=semver)](https://github.com/hirorylabo/codex-openrouter-desktop/releases)
+
 This CLI leaves the official signed `/Applications/ChatGPT.app` untouched. A marker block in `~/.codex/config.toml` and a local guard add verified OpenRouter models to the stock model picker only while the dedicated launcher is running. It creates no clone and patches no ASAR. The project does not distribute ChatGPT.app, ASAR files, API keys, cookies, history, userData, or logs.
 
 `Codex OpenRouter.app` is a small management launcher. Opening it shows the current model count, default model, and workspace; ChatGPT starts only when you press **OpenRouterで起動**.
