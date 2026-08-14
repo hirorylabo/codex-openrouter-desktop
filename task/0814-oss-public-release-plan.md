@@ -2,9 +2,7 @@
 
 作成日: 2026-08-14 / 基準commit: `d22840c` / 対象: `hirorylabo/codex-openrouter-desktop`
 
-Status: **Phase 0〜4 完了（2026-08-14）。Phase 5 は実機GUI検証まで完了し、残る未実施は
-「ZDRなしモデル追加と実応答」1項目のみ（利用者のOpenRouter credentialが選択中5モデル以外を
-呼び出せないため実行不能）。Phase 6 の`v0.2.0` tagは No-Go。**
+Status: **Phase 0〜5 完了（2026-08-14）。Phase 5 実機リリースゲートは全項目PASS。Phase 6 実行可。**
 基準commitは`d22840c`から`e1eacc4`（PR #5 squash merge）へ進んだ。
 
 ## 結論
@@ -345,7 +343,7 @@ tag/release失敗時はpublic tagをforce移動・再利用しない。transient
 - [x] Phase 2 OSS強化PR作成
 - [x] Phase 3 CI・レビュー PASS / merge済み
 - [x] Phase 4 CodeQL・ruleset PASS
-- [~] Phase 5 実機リリースゲート — GUI検証まで完了 / 残1項目はcredential制約で実行不能
+- [x] Phase 5 実機リリースゲート PASS
 - [ ] Phase 6 v0.2.0 release・assets・attestation PASS
 - [ ] Phase 7 文書archive整理（任意）
 
@@ -545,33 +543,57 @@ ephemeral portはcycleごとに変わった（51276 → 51459）。各cycleのac
 非ZDR 6件とZDR 1件、計7回の失敗を通じてprofile digestは常に`1a952c93…`のままで、
 install-manifestもテスト前後でバイト単位一致だった。RELEASE_NOTESの主張が実機で裏付けられている。
 
-#### 未完了の1項目 — 利用者のOpenRouter credentialの制約
+#### 最終項目 — ZDRなしモデルの追加と実応答（PASS）
 
-「明示承認後にZDRなしモデルを1件追加し、管理画面・doctor・pickerの警告と実応答を確認する」は
-**実行できなかった。** 利用者の承認は得たうえで実施したが、次の理由で完了しない。
+当初この項目は実行できなかった。非ZDR 6件に加え、判別軸の切り分けとして未選択のZDRモデル
+`google/gemini-3.7-flash` でも対照実験したが、すべて
+`ERROR: API keyでは呼び出せないmodelが選択されています` で拒否された。
 
-追加を試みた非ZDRモデルはすべて `ERROR: API keyでは呼び出せないmodelが選択されています` で拒否された。
+弾かれるmodelへ最小の呼び出し（`max_tokens=1`）を投げて原因を特定した。
 
-- `sakana/sakana-namazu`（GUIの確認sheet経由）
-- `deepseek/deepseek-v4-pro-0813`, `upstage/solar-pro4`, `qwen/qwen3.7-flash`,
-  `anthropic/claude-opus-5-fast`, `meituan/longcat-2.0`（CLI経由）
+```
+No endpoints available matching your guardrail restrictions and data policy.
+Configure: https://openrouter.ai/settings/privacy
+```
 
-ZDRの有無が原因かを切り分けるため、**未選択のZDRモデル** `google/gemini-3.7-flash` でも
-対照実験したが、同じエラーで拒否された。つまり判別軸はZDRではない。
+ZDRの有無ではなく、**OpenRouterアカウント側のguardrail（modelホワイトリスト）**がendpointを
+絞っていた。APIでの解除も試みたが、`GET /api/v1/guardrails` は
+`401 {"error":{"message":"Invalid management key"}}` を返す。導入済みcredentialは推論用キー
+（`is_management_key: false` / `is_provisioning_key: false`）なので権限がなく、変更はWeb consoleでしか
+行えないと判断して利用者へ差し戻した。
 
-一方で`doctor --network`は選択中5モデルすべてで実応答を得ている（AkashML / BaseTen /
-CoreWeave / DeepInfra）。したがって**このOpenRouter API keyは、現在選択中の5モデル以外を
-呼び出せない**状態にある。keyのmodel scopeなど利用者側のアカウント設定と考えられ、
-本プロダクトの不具合ではない。
+利用者が `codex-zdr` という名前のmodelホワイトリストguardrailを削除したのち、再実行してPASSした。
 
-この制約が解けない限り、この1項目は原理的に埋まらない。計画の「1件でも未実施・FAIL・未確認なら
-tagはNo-Go」に従い、**`v0.2.0` tagは引き続きNo-Go**とする。
+解除直後の再測定では、非ZDRのうち呼び出せるものと弾かれるものが分かれた。data policy側の
+ZDR強制は残っており、ホワイトリストだけが外れた形になる。また`--refresh`でcatalogを取り直すと
+ZDR判定が175件→176件へ変わり、`deepseek/deepseek-v4-pro-0813`はFireworksのZDR endpointが
+見えるようになって**ZDR扱いへ変化した**。そのため検証対象には、refresh後も
+`zdr_supported=false`のままで呼び出せた `anthropic/claude-opus-5-fast`（Anthropic）を使った。
 
-判断の選択肢は次のいずれかになる。
+`profile apply --stdin-json` で6モデル構成へ変更（digest `88dff719…`、profile backupが自動生成）。
+警告は3面すべてに出た。
 
-1. 対象modelを呼び出せるOpenRouter credentialを用意して、この項目を実施する。
-2. 「現在のcredentialでは実施不能」を根拠に、この項目を計画から外す判断を利用者が下す。
-3. tagを見送る。
+| 面 | 実際の表示 |
+| --- | --- |
+| 管理画面 | `表示モデル 6件` とともに `ZDRなしのモデルを1件使用中です。そのモデルへ送った内容はproviderに保持される可能性があります。` |
+| `doctor --network` | `WARN: anthropic/claude-opus-5-fast はZDRなしで動作します。送信内容がproviderに保持される可能性があります` |
+| picker（composite catalog） | 当該entryのdescriptionに `ZDRなし（送信内容がproviderに保持される可能性あり）`。ZDRモデル側は `ZDR稼働endpoint最安: …` と出る |
+
+実応答は `OK: 選択中のmodelはすべてOpenRouter keyで呼び出せます`（canaryは選択中の全modelを叩く）と、
+直接呼び出しで `provider=Anthropic` を得たことの両方で確認した。ZDRモデル5件も従来どおり
+稼働中ZDR providerで応答している。
+
+compositeカタログは14 entry（純正8 + `[OR]`付き6）になり、追加したmodelがpickerへ出ることを確認した。
+
+その後、保全しておいたpayloadで元の5モデル構成へ復帰。profile digestは`1a952c93…`へ戻り、
+`doctor --network --runtime --secret-scan` は `RESULT: PASS`、ZDRなしWARNも消えた。
+profile変更で再生成待ちになったcompositeカタログも1サイクル起動して作り直し、
+`OK: compositeカタログは契約を満たします（picker表示 10件）` の初期状態へ完全復帰させた。
+
+#### Phase 5 判定
+
+**全項目PASS。** 計画の「1件でも未実施・FAIL・未確認ならtagはNo-Go」を満たしたため、
+Phase 6へ進める。
 
 なお`upgrade`実行時に `WARNING: API keyのspend limitが未設定です` が出ている。公開の停止条件では
 ないが、OpenRouter側でspend limitを設定しておくことを推奨する。
