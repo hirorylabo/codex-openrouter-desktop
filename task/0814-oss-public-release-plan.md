@@ -2,8 +2,9 @@
 
 作成日: 2026-08-14 / 基準commit: `d22840c` / 対象: `hirorylabo/codex-openrouter-desktop`
 
-Status: **Phase 0〜4 完了（2026-08-14）。Phase 5 は自動検証分のみPASS、GUI目視分が未実施。
-Phase 6 の`v0.2.0` tagは現時点で No-Go。**
+Status: **Phase 0〜4 完了（2026-08-14）。Phase 5 は実機GUI検証まで完了し、残る未実施は
+「ZDRなしモデル追加と実応答」1項目のみ（利用者のOpenRouter credentialが選択中5モデル以外を
+呼び出せないため実行不能）。Phase 6 の`v0.2.0` tagは No-Go。**
 基準commitは`d22840c`から`e1eacc4`（PR #5 squash merge）へ進んだ。
 
 ## 結論
@@ -344,7 +345,7 @@ tag/release失敗時はpublic tagをforce移動・再利用しない。transient
 - [x] Phase 2 OSS強化PR作成
 - [x] Phase 3 CI・レビュー PASS / merge済み
 - [x] Phase 4 CodeQL・ruleset PASS
-- [~] Phase 5 実機リリースゲート — 自動検証分PASS / GUI目視分 未実施
+- [~] Phase 5 実機リリースゲート — GUI検証まで完了 / 残1項目はcredential制約で実行不能
 - [ ] Phase 6 v0.2.0 release・assets・attestation PASS
 - [ ] Phase 7 文書archive整理（任意）
 
@@ -499,59 +500,81 @@ live E2Eの「pickerにOpenRouterモデルが5件並ぶ」と一致する。tree
 起動したlauncherプロセスと、確認に使ったスクリーンショットは削除済み。中断後の`doctor`は
 `RESULT: PASS`で状態は汚れていない。
 
-#### ソース検証で埋めた4項目
+#### 実機GUI検証（2026-08-14、Mac解錠後）
 
-GUIを操作できない間に、UI既定値と分岐を`portable/launcher/app/`のソースで確認した。
-**これは実機確認と同等ではない。**「振る舞いが不明」だった状態から「ソースは正しい。残る
-リスクはビルド済みバイナリがソースと異なることだけ」へ下がった、という位置づけで読むこと。
-なお`macos-compile` jobがこのソースをCIで毎回コンパイルしており、accessibility treeで
-ビルド済みappが期待どおりの管理画面を描画することも確認できている。
+利用者がMacを解錠したので、残っていた項目をAppleScript（System Events）のaccessibility API
+経由で実機検証した。スクリーンショットは使っていない（`screencapture`はZed Previewへの
+画面収録許可要求を誘発したため、権限を与えず取り下げた。実体はaccessibility treeで取れる）。
 
-| 項目 | 根拠 |
+##### `scripts/macos_installed_e2e.zsh` PASS
+
+「OpenRouterで起動」のクリックとChatGPT.appの通常終了を自動で投げ、**2/2 cycles PASS、FAIL 0**。
+
+```
+[PASS] profile show: schema・選択・registryを確認（秘密値なし）
+[PASS] models list: 候補・価格・ZDR判定を確認（秘密値なし）
+[PASS] cycle 1: active（ephemeral port・0600 token・guard）
+[PASS] cycle 1: inactive（port 0 stub・tokenなし）
+[PASS] cycle 2: active（ephemeral port・0600 token・guard）
+[PASS] cycle 2: inactive（port 0 stub・tokenなし）
+=== installed launcher E2E PASS: 2/2 cycles ===
+```
+
+ephemeral portはcycleごとに変わった（51276 → 51459）。各cycleのactive時に、guard token 0600、
+鍵がconfig・catalog・guard log・process argumentsに無いこと、純正app無改変を確認している。
+
+##### GUI各項目
+
+| 項目 | 実機での確認内容 |
 | --- | --- |
-| `ZDRのみ`が既定ON | `ModelCatalogTable.swift:24` `var zdrOnly = true`（コメント「既定でZDRのみ。安全側を既定にし、外すのは利用者の明示操作にする。」）＋ `ModelSettingsWindow.swift:87` `zdrOnly.state = .on`。モデル既定とUIチェックボックス初期状態の両方がON |
-| 選択済みモデルがfilterで消えない | `ModelCatalogTable.swift:121-126` `matches()`が**全filter判定より前**に `if selected.contains(entry.id) { return true }` で早期return。さらにL203-204で選択済みを先頭へ固定 |
-| 価格・公開日・7dトークン量の列とsort | `ModelCatalogTable.swift:59-65` で `IN $/M`(.input) / `OUT $/M`(.output) / `公開日`(.released) / `7dトークン`(.usage) / `モデル`(.model) の各列に`sortField`を付与。既定sortは公開日降順。新しい列は初回降順、再クリックでAppKitが昇順へ反転しsort indicatorを出す |
-| 設定画面にAPI keyが出ない | `portable/launcher/app/*.swift`全体を `api_key\|sk-or-\|keychain\|secret\|token` でgrepしてヒットするのは`usageTokens`（トークン使用量）のみ。Swift側に鍵を取得・保持・表示するコードが存在しない。ProfileBridge経由で`profile show`/`models list`を読むだけで、両者は非対話E2Eで「秘密値なし」PASS済み |
-| ZDRなし選択時の確認sheetと取消時不変 | `ModelSettingsWindow.swift:247-278`。`toggle(wanted:true)`は`entry.zdrSupported`が偽なら`confirmNonZdr`を呼ぶだけで**selectionを変更しない**。`confirmNonZdr`は`NSAlert(.warning)`を`beginSheetModal`で出し、`guard response == .alertFirstButtonReturn else { return }` により「やめる」では`selected`に触れず早期returnする |
+| 管理画面 | `表示モデル 5件` / `既定モデル: DeepSeek V4 Flash 0731` / `workspace: <絶対パス>` と、`モデル設定…` `OpenRouterで起動` の両ボタンを取得 |
+| `⌘,` | launcherへ`⌘,`を送ると `モデル設定` windowが増える（windows 1 → 2） |
+| folder drop | `open -a <launcher> <folder>`（Finderのdropと同じopen AppleEvent）でworkspace表示が切り替わり、**ChatGPTは起動しなかった**。元のworkspaceへ戻して復帰も確認 |
+| 純正appからのhandoff | 純正app稼働中に「OpenRouterで起動」を押すと、`終了してOpenRouterモードへ切り替える` / `キャンセル` を持つモーダルアラートが出て14秒間ブロックし続け、その間ChatGPTのPIDは不変。**キャンセル**を押すとPIDが同一のまま、catalog blockなし・guard tokenなしのvanillaを維持。**承認**するとPIDが変わり（終了→再起動）catalog blockが入った |
+| 設定画面にAPI keyが出ない | `モデル設定` windowの全static text・button・checkboxを列挙して鍵文字列は皆無 |
+| 価格・公開日・7dトークン列 | テーブルは175行×7列。セルを読むと `Sakana Namazu / sakana/sakana-namazu / IN=0.95 / OUT=4 / 2026-08-11 / — / ZDRなし · 学習不明 · reasoning`。**利用量圏外が`0`でなく`—`**で出る仕様も一致 |
+| filter | `ZDRのみ` ON=175行 → OFF=330行 → ON=175行。`models list`の ZDR 175件 / 候補 330件と完全一致 |
+| `ZDRのみ`既定ON | 設定画面を開いた直後が `ZDRのみ`=ON、他3filterはoff |
+| 選択済みがfilterで消えない | 上のfilter往復で`選択 5件`が一度も減らない。さらに1モデルしか一致しない検索語でも`表示 6件`（選択5＋一致1）になり、選択済みが常に残った |
+| ZDRなし確認sheet | 非ZDRの`sakana/sakana-namazu`を選ぶと `Sakana Namazu はZDRなしで動作します` のsheetが出て `やめる` / `追加する` を持つ |
+| 取消時は変更されない | `やめる`でcheckboxは0へ戻り`選択 5件`のまま。永続側もprofile digestが`1a952c93…`で不変 |
 
-#### 残りの未確認項目
+##### 保存検証ゲートの実証（計画外の収穫）
 
-実機のGUI操作でしか埋まらないものだけが残っている。
+「検証して保存」および`profile apply --stdin-json`は、**呼び出せないmodelがあると1バイトも書かない**。
+非ZDR 6件とZDR 1件、計7回の失敗を通じてprofile digestは常に`1a952c93…`のままで、
+install-manifestもテスト前後でバイト単位一致だった。RELEASE_NOTESの主張が実機で裏付けられている。
 
-- [x] 管理画面に表示モデル数・既定モデル・workspaceが出る（accessibility treeで確認済み）
-- [x] 設定画面にAPI keyが出ない（ソース検証）
-- [x] 価格・公開日・7dトークン量の列とsort/filterが動く（ソース検証）
-- [x] `ZDRのみ`が既定ONで、選択済みモデルがfilterで消えない（ソース検証）
-- [x] ZDRなしモデル選択時に確認sheetが出て、取消時は変更されない（ソース検証）
-- [ ] **installed launcherが2 cycleともactive/inactiveへ正常遷移する**
-      — 状態機械自体は隔離live E2Eが28/28で実証済み（「2回目起動: catalog blockが再び入る」
-      「2回目終了: 非接続stubへ戻る」を含む）。残るのは導入済みbundle＋実`~/.codex`での実行。
-- [ ] **`⌘,`、folder drop、純正appからのhandoffが期待どおり**
-- [ ] **明示承認後にZDRなしモデルを1件追加し、管理画面・doctor・pickerの警告と実応答を確認する**
-      — 本計画の承認境界により、別途明示承認が必要
-- [ ] **元のprofileへ戻し、再度doctorが期待状態を報告する**（上の項目に従属）
+#### 未完了の1項目 — 利用者のOpenRouter credentialの制約
 
-`codex-openrouter launch`は導入済みruntimeをactive化して純正appを起動するCLI経路だが、
-ロック画面での無人実行は見送った。失敗した場合に利用者の実`~/.codex`がactiveのまま
-残るリスクがあり、2 cycleの状態遷移は隔離E2Eで既に実証済みで、割に合わない。
+「明示承認後にZDRなしモデルを1件追加し、管理画面・doctor・pickerの警告と実応答を確認する」は
+**実行できなかった。** 利用者の承認は得たうえで実施したが、次の理由で完了しない。
 
-実行方法（ChatGPT.appを終了できる時間帯に、リポジトリroot で）:
+追加を試みた非ZDRモデルはすべて `ERROR: API keyでは呼び出せないmodelが選択されています` で拒否された。
 
-```bash
-scripts/macos_installed_e2e.zsh
-```
+- `sakana/sakana-namazu`（GUIの確認sheet経由）
+- `deepseek/deepseek-v4-pro-0813`, `upstage/solar-pro4`, `qwen/qwen3.7-flash`,
+  `anthropic/claude-opus-5-fast`, `meituan/longcat-2.0`（CLI経由）
 
-180秒では足りない場合は延長できる。
+ZDRの有無が原因かを切り分けるため、**未選択のZDRモデル** `google/gemini-3.7-flash` でも
+対照実験したが、同じエラーで拒否された。つまり判別軸はZDRではない。
 
-```bash
-CODEX_OPENROUTER_E2E_TIMEOUT=600 scripts/macos_installed_e2e.zsh
-```
+一方で`doctor --network`は選択中5モデルすべてで実応答を得ている（AkashML / BaseTen /
+CoreWeave / DeepInfra）。したがって**このOpenRouter API keyは、現在選択中の5モデル以外を
+呼び出せない**状態にある。keyのmodel scopeなど利用者側のアカウント設定と考えられ、
+本プロダクトの不具合ではない。
 
-#### tag判定
+この制約が解けない限り、この1項目は原理的に埋まらない。計画の「1件でも未実施・FAIL・未確認なら
+tagはNo-Go」に従い、**`v0.2.0` tagは引き続きNo-Go**とする。
 
-計画の「1件でも未実施・FAIL・未確認ならtagはNo-Go」に従い、**`v0.2.0` tagは現時点でNo-Go**。
-上記8項目が埋まり、利用者が公開を明示承認した時点でPhase 6へ進む。
+判断の選択肢は次のいずれかになる。
+
+1. 対象modelを呼び出せるOpenRouter credentialを用意して、この項目を実施する。
+2. 「現在のcredentialでは実施不能」を根拠に、この項目を計画から外す判断を利用者が下す。
+3. tagを見送る。
+
+なお`upgrade`実行時に `WARNING: API keyのspend limitが未設定です` が出ている。公開の停止条件では
+ないが、OpenRouter側でspend limitを設定しておくことを推奨する。
 
 ### 未処理・次の判断事項
 
