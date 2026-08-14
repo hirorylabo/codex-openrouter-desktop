@@ -499,17 +499,42 @@ live E2Eの「pickerにOpenRouterモデルが5件並ぶ」と一致する。tree
 起動したlauncherプロセスと、確認に使ったスクリーンショットは削除済み。中断後の`doctor`は
 `RESULT: PASS`で状態は汚れていない。
 
+#### ソース検証で埋めた4項目
+
+GUIを操作できない間に、UI既定値と分岐を`portable/launcher/app/`のソースで確認した。
+**これは実機確認と同等ではない。**「振る舞いが不明」だった状態から「ソースは正しい。残る
+リスクはビルド済みバイナリがソースと異なることだけ」へ下がった、という位置づけで読むこと。
+なお`macos-compile` jobがこのソースをCIで毎回コンパイルしており、accessibility treeで
+ビルド済みappが期待どおりの管理画面を描画することも確認できている。
+
+| 項目 | 根拠 |
+| --- | --- |
+| `ZDRのみ`が既定ON | `ModelCatalogTable.swift:24` `var zdrOnly = true`（コメント「既定でZDRのみ。安全側を既定にし、外すのは利用者の明示操作にする。」）＋ `ModelSettingsWindow.swift:87` `zdrOnly.state = .on`。モデル既定とUIチェックボックス初期状態の両方がON |
+| 選択済みモデルがfilterで消えない | `ModelCatalogTable.swift:121-126` `matches()`が**全filter判定より前**に `if selected.contains(entry.id) { return true }` で早期return。さらにL203-204で選択済みを先頭へ固定 |
+| 価格・公開日・7dトークン量の列とsort | `ModelCatalogTable.swift:59-65` で `IN $/M`(.input) / `OUT $/M`(.output) / `公開日`(.released) / `7dトークン`(.usage) / `モデル`(.model) の各列に`sortField`を付与。既定sortは公開日降順。新しい列は初回降順、再クリックでAppKitが昇順へ反転しsort indicatorを出す |
+| 設定画面にAPI keyが出ない | `portable/launcher/app/*.swift`全体を `api_key\|sk-or-\|keychain\|secret\|token` でgrepしてヒットするのは`usageTokens`（トークン使用量）のみ。Swift側に鍵を取得・保持・表示するコードが存在しない。ProfileBridge経由で`profile show`/`models list`を読むだけで、両者は非対話E2Eで「秘密値なし」PASS済み |
+| ZDRなし選択時の確認sheetと取消時不変 | `ModelSettingsWindow.swift:247-278`。`toggle(wanted:true)`は`entry.zdrSupported`が偽なら`confirmNonZdr`を呼ぶだけで**selectionを変更しない**。`confirmNonZdr`は`NSAlert(.warning)`を`beginSheetModal`で出し、`guard response == .alertFirstButtonReturn else { return }` により「やめる」では`selected`に触れず早期returnする |
+
 #### 残りの未確認項目
 
+実機のGUI操作でしか埋まらないものだけが残っている。
+
 - [x] 管理画面に表示モデル数・既定モデル・workspaceが出る（accessibility treeで確認済み）
-- [ ] installed launcherが2 cycleともactive/inactiveへ正常遷移する
-- [ ] `⌘,`、folder drop、純正appからのhandoffが期待どおり
-- [ ] 設定画面にAPI keyが出ない
-- [ ] 価格・公開日・7dトークン量の列とsort/filterが動く
-- [ ] `ZDRのみ`が既定ONで、選択済みモデルがfilterで消えない
-- [ ] ZDRなしモデル選択時に確認sheetが出て、取消時は変更されない
-- [ ] 明示承認後にZDRなしモデルを1件追加し、管理画面・doctor・pickerの警告と実応答を確認する
-- [ ] 元のprofileへ戻し、再度doctorが期待状態を報告する
+- [x] 設定画面にAPI keyが出ない（ソース検証）
+- [x] 価格・公開日・7dトークン量の列とsort/filterが動く（ソース検証）
+- [x] `ZDRのみ`が既定ONで、選択済みモデルがfilterで消えない（ソース検証）
+- [x] ZDRなしモデル選択時に確認sheetが出て、取消時は変更されない（ソース検証）
+- [ ] **installed launcherが2 cycleともactive/inactiveへ正常遷移する**
+      — 状態機械自体は隔離live E2Eが28/28で実証済み（「2回目起動: catalog blockが再び入る」
+      「2回目終了: 非接続stubへ戻る」を含む）。残るのは導入済みbundle＋実`~/.codex`での実行。
+- [ ] **`⌘,`、folder drop、純正appからのhandoffが期待どおり**
+- [ ] **明示承認後にZDRなしモデルを1件追加し、管理画面・doctor・pickerの警告と実応答を確認する**
+      — 本計画の承認境界により、別途明示承認が必要
+- [ ] **元のprofileへ戻し、再度doctorが期待状態を報告する**（上の項目に従属）
+
+`codex-openrouter launch`は導入済みruntimeをactive化して純正appを起動するCLI経路だが、
+ロック画面での無人実行は見送った。失敗した場合に利用者の実`~/.codex`がactiveのまま
+残るリスクがあり、2 cycleの状態遷移は隔離E2Eで既に実証済みで、割に合わない。
 
 実行方法（ChatGPT.appを終了できる時間帯に、リポジトリroot で）:
 
