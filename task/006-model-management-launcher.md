@@ -2,7 +2,7 @@
 
 ## Context
 
-`task/PLAN (6).md` の実装。`Codex OpenRouter.app` を小型の管理ランチャーへ変更し、
+[`docs/archive/model-management-ux-plan.md`](../docs/archive/model-management-ux-plan.md) の実装。`Codex OpenRouter.app` を小型の管理ランチャーへ変更し、
 純正pickerに出すモデル集合の編集口を1つだけ用意する。
 
 前提となる設計判断（PLANより）:

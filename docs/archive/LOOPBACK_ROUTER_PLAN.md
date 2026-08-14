@@ -132,7 +132,7 @@ Phase 0の失敗はnative中継のみに起因する。**nativeを一切中継�
 - proxy: 単一プロセス、自前実装。外部依存を足さない
 - 判定: 最初のリクエストからmodel slugを読み、OR 5モデルの明示集合に含まれるかだけを見る。含まれなければnative扱い
 - native: 上流へバイト透過中継。ヘッダを改変せず、本文をパースも保存もしない
-- OpenRouter: Keychainから鍵を取得し、`responses` APIへ変換。`allow_fallbacks=false`、ZDR endpoints検証は既存の[models/registry.json](models/registry.json)と refresh/doctor 資産をそのまま流用
+- OpenRouter: Keychainから鍵を取得し、`responses` APIへ変換。`allow_fallbacks=false`、ZDR endpoints検証は既存の[models/registry.json](../../models/registry.json)と refresh/doctor 資産をそのまま流用
 - catalog生成: `codex debug models --bundled` の全nativeエントリ + OR 5エントリ（native entryをcloneし slug / display_name / description / supported_reasoning_levels / priority を差し替え）
 - display_nameに `[OpenRouter] ` prefixを入れる。**labelパッチ不要**
 - config: marker block で `model_catalog_json` と `openai_base_url` の2キーのみ。rollbackはブロック削除

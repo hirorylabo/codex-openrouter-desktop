@@ -57,7 +57,7 @@ Status: **完了（Phase 1〜4 + prod反映）。v0.2.0として実機稼働中*
   実運用条件では計測上ゼロ、両者が同一マイクロ秒で開始する人工条件でのみ再現。
   失っても routing は安全側のままで誤送信にはならない
 
-関連: [LOOPBACK_ROUTER_PLAN.md](../LOOPBACK_ROUTER_PLAN.md) §10（案Dの実測根拠）、[SESSION_CONTINUITY_PLAN.md](../SESSION_CONTINUITY_PLAN.md)（案A・退避経路）
+関連: [LOOPBACK_ROUTER_PLAN.md](../docs/archive/LOOPBACK_ROUTER_PLAN.md) §10（案Dの実測根拠）、[SESSION_CONTINUITY_PLAN.md](../docs/archive/SESSION_CONTINUITY_PLAN.md)（案A・退避経路）
 
 ## Context
 
