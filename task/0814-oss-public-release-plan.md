@@ -2,7 +2,8 @@
 
 作成日: 2026-08-14 / 基準commit: `d22840c` / 対象: `hirorylabo/codex-openrouter-desktop`
 
-Status: **Phase 0〜5 完了（2026-08-14）。Phase 5 実機リリースゲートは全項目PASS。Phase 6 実行可。**
+Status: **Phase 0〜6 完了（2026-08-14）。`v0.2.0` prereleaseを公開し、checksumとattestationを
+再取得して検証済み。残るのはPhase 7（任意）とDependabot PR 3本の判断のみ。**
 基準commitは`d22840c`から`e1eacc4`（PR #5 squash merge）へ進んだ。
 
 ## 結論
@@ -344,7 +345,7 @@ tag/release失敗時はpublic tagをforce移動・再利用しない。transient
 - [x] Phase 3 CI・レビュー PASS / merge済み
 - [x] Phase 4 CodeQL・ruleset PASS
 - [x] Phase 5 実機リリースゲート PASS
-- [ ] Phase 6 v0.2.0 release・assets・attestation PASS
+- [x] Phase 6 v0.2.0 release・assets・attestation PASS
 - [ ] Phase 7 文書archive整理（任意）
 
 ### Phase 0 preflight（2026-08-14）
@@ -597,6 +598,54 @@ Phase 6へ進める。
 
 なお`upgrade`実行時に `WARNING: API keyのspend limitが未設定です` が出ている。公開の停止条件では
 ないが、OpenRouter側でspend limitを設定しておくことを推奨する。
+
+### Phase 6 v0.2.0 tag・release（2026-08-14）
+
+tag前に停止条件を再確認した。
+
+- `main`と`origin/main`が`812a983`で一致、working tree clean
+- `VERSION`が`0.2.0`
+- `v0.2.0`のlocal tag・remote tag・releaseがいずれも未存在
+- `812a983`のCIとPush on mainがともに`success`
+- code scanningのopen alertが0件
+- `RELEASE_NOTES.md`の先頭が`# v0.2.0`
+
+annotated tagを`812a983`へ打ってpushした。Release workflow（run 31768063952）は30秒で`success`。
+
+```
+git tag -a v0.2.0 812a983bd422e202fe9fec833ceda26965033c18 -m "codex-openrouter-desktop v0.2.0"
+git push origin v0.2.0
+```
+
+公開結果は`isPrerelease: true`、`name: codex-openrouter-desktop v0.2.0`、asset 3件。
+
+#### assets再取得と検証
+
+計画どおり、buildに使ったdistではなく別directoryへ`gh release download`し直して検証した。
+
+`shasum -a 256 -c SHA256SUMS` は tar.gz と spdx.json がともに `OK`。
+
+`gh attestation verify` は3 assetすべて exit 0。provenanceは次のとおり全件一致した。
+
+| 項目 | 値 |
+| --- | --- |
+| repo | `https://github.com/hirorylabo/codex-openrouter-desktop` |
+| ref | `refs/tags/v0.2.0` |
+| commit | `812a983bd422e202fe9fec833ceda26965033c18` |
+| builder / workflow | `.../.github/workflows/release.yml@refs/tags/v0.2.0` |
+| issuer | `https://token.actions.githubusercontent.com` |
+
+attestationが署名しているsubjectのdigestと、取得したファイルの実digestも突き合わせて一致を確認した。
+
+| asset | sha256 |
+| --- | --- |
+| `codex-openrouter-desktop-v0.2.0.tar.gz` | `35b0f93c831d4babb8e2612ba5457b31e62cee2a7adc841892c1768d7dc091c9` |
+| `codex-openrouter-desktop-v0.2.0.spdx.json` | `031e6b97a8e62b47e042dccf5c21118c2f78cb465d0dcb0a00b21ba2c8aeeb82` |
+| `SHA256SUMS` | `f2529f403203a2f0d52f2e057a03bf4423b93619b0080e713b7eac86883b168d` |
+
+release workflowのpermissionは今回のPRで最小化した構成（top-level `contents: read`、
+`release` jobにのみ`contents: write` / `id-token: write` / `attestations: write`）で動作しており、
+attestation発行に支障がないことも確認できた。
 
 ### 未処理・次の判断事項
 
