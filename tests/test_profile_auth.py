@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import socket
 import tempfile
@@ -169,8 +168,6 @@ class ProfileTests(unittest.TestCase):
 
 class AuthenticationTests(unittest.TestCase):
     def test_fresh_setup_validates_once_then_installs_without_permanent_helper(self) -> None:
-        from codex_openrouter import install as install_module
-
         key = "sk-or-v1-" + "z" * 64
 
         class Store:
@@ -208,7 +205,7 @@ class AuthenticationTests(unittest.TestCase):
              mock.patch.object(cli, "obtain_key", return_value=key), \
              mock.patch.object(cli, "validate_key_and_profile", return_value={"limit": 10}) as validate, \
              mock.patch.object(cli, "root", return_value=ROOT), \
-             mock.patch.object(install_module, "_install_unlocked", return_value=0) as install:
+             mock.patch.object(cli, "_install_unlocked", return_value=0) as install:
             self.assertEqual(0, cli.setup_command(args))
         validate.assert_called_once_with(key, {"minimax/minimax-m3"})
         self.assertTrue(store.stored)
