@@ -21,6 +21,7 @@ PATTERNS = {
 FORBIDDEN_NAMES = {"auth.json", ".env", "Cookies", "Login Data"}
 FORBIDDEN_SUFFIXES = {".asar", ".db", ".sqlite", ".sqlite3"}
 SKIP_PARTS = {".git", "node_modules", "__pycache__", "dist"}
+OS_JUNK_NAMES = {".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", "Thumbs.db", "desktop.ini"}
 
 
 def scan_bytes(label: str, payload: bytes, findings: list[str]) -> None:
@@ -36,6 +37,17 @@ def forbidden_path(path: Path | str) -> bool:
         or value.suffix.lower() in FORBIDDEN_SUFFIXES
         or any(part.endswith(".app") for part in value.parts)
     )
+
+
+def os_junk_path(path: Path | str) -> bool:
+    """OSが自動生成する配布対象外のファイル。
+
+    作業ツリーには正当に存在しうるので`--tree`では検査せず、配布archiveでのみ弾く。
+    `.DS_Store`はFinderの表示状態に加えて過去にそのディレクトリへ存在したファイル名を
+    保持しうるため、成果物に載せない。
+    """
+    value = Path(path)
+    return value.name in OS_JUNK_NAMES or value.name.startswith("._")
 
 
 def scan_tree(root: Path, findings: list[str]) -> None:
@@ -81,6 +93,8 @@ def scan_archive(path: Path, findings: list[str]) -> None:
         for member in archive.getmembers():
             if forbidden_path(member.name):
                 findings.append(f"archive:{member.name}: forbidden runtime artifact")
+            if os_junk_path(member.name):
+                findings.append(f"archive:{member.name}: OS-generated file must not ship")
             if member.isfile() and member.size <= 32 * 1024 * 1024:
                 handle = archive.extractfile(member)
                 if handle:
