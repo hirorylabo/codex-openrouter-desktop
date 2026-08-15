@@ -2,9 +2,10 @@
 
 作成日: 2026-08-14 / 基準commit: `d22840c` / 対象: `hirorylabo/codex-openrouter-desktop`
 
-Status: **完了（2026-08-14）。Phase 0〜7 すべて実施。`v0.2.0` prereleaseを公開し、checksumと
-attestationを再取得して検証済み。残るのはDependabot PR 3本の判断のみ。**
-基準commitは`d22840c`から`e1eacc4`（PR #5 squash merge）へ進んだ。
+Status: **完了（2026-08-15）。Phase 0〜7 と、そこから派生した2件をすべて実施。未処理事項なし。**
+`v0.2.0` prereleaseを公開しchecksumとattestationを再取得して検証済み、Dependabot PR 3本をmerge、
+Phase 7の検証中に見つけた`.DS_Store`同梱バグを修正した。
+基準commitは`d22840c`から`97cbc70`へ進んだ（経由: `e1eacc4` → `7f293b7` → `87eacbd` → `97cbc70`）。
 
 ## 結論
 
@@ -779,3 +780,52 @@ merge前レビューで確認したもの:
 merge後、`checkout` v7 / `setup-python` v7 はmainへのpushで実行され、Python 3.11〜3.14の
 4マトリクス・secret scan・macOSコンパイルを通過した。`release.yml`の`attest` 4.2.2だけは
 次のtag pushまで未実測で、既存手順の`gh attestation verify`がそのまま検証点になる。
+
+## 引き継ぎ（2026-08-15時点）
+
+### 現在の状態
+
+| 項目 | 状態 |
+|---|---|
+| `main` | `97cbc70`、CI全7ジョブgreen、working tree clean |
+| release | `v0.2.0` prerelease公開済み、3 assets検証済み（provenance commit `812a983`） |
+| open PR / remote branch | なし（remoteは`main`のみ） |
+| repository設定 | `deleteBranchOnMerge`有効、CodeQL default setup、main ruleset（required check = `ci-required`） |
+| 利用者環境 | 実機テスト前の状態へ復元済み。profile digest `1a952c93…`、install-manifestはbyte-identical、`doctor` RESULT: PASS |
+
+このtaskから発生した未処理事項はない。
+
+### 次にこのrepositoryへ触るときの注意
+
+**1. 次のrelease（v0.2.1以降）を切るとき**
+
+`release.yml`の`actions/attest` 4.2.2は**まだ一度も実行されていない**。tag pushでしか動かないため、
+CIのgreenはこれを検証していない。静的には確認済み（pin SHAの`action.yml`で`subject-path`が
+`GITHUB_ARTIFACTS_LIST`より優先されることを読んだ）が、実測は次のtagが初回になる。
+
+tag push後、既存手順の`gh attestation verify`のexit codeを必ず確認する。
+失敗した場合は**public tagをforce移動・再利用しない**。Actions UIからのre-runはtagを動かさないので
+そちらで復旧する（`release.yml`に`workflow_dispatch`は無い）。
+
+**2. 配布物を触るとき**
+
+`build_release.py`の収集は`git ls-files -z`ベース（`tracked_paths()`）。
+`FILES` / `DIRECTORIES`のallowlistに何かを足す場合、その配下の**追跡ファイル全件**が配布される。
+filesystem走査ではないので、ローカルの無視対象ファイルや空ディレクトリは入らない。
+
+`secret_scan.py --archive`のOS生成ファイル検出は`--tree`では動かない。
+作業ツリーに`.DS_Store`が正当に存在するための意図的な分離であり、
+`forbidden_path`（`--tree`と共有）へOS生成ファイルを足すと開発者の手元で誤検知する。
+
+**3. Phase 5の未実施項目**
+
+実機E2Eのうち一部は利用者の対話操作を要するため未実施のまま。詳細は「Phase 5 実機リリースゲート」
+の節を参照。v0.2.0はprereleaseとして公開済みなので、正式release昇格を検討する際はここを埋める。
+
+### 参照
+
+- archive tag一覧: `git ls-remote --tags origin | grep archive/`
+  squash mergeで到達不能になった作業ブランチのSHAをすべて保全してある。
+  復元は `git push origin <tag>:refs/heads/<branch>`。
+- 本taskで作成したPR: #5（OSS強化）、#15（文書archive整理）、#16（`.DS_Store`同梱バグ修正）
+- Dependabot: #6 / #7 / #8
