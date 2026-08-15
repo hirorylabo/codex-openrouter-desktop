@@ -23,7 +23,7 @@ jobs:
           python-version: "3.11"
       - name: Test and audit
         run: |
-          PYTHONPATH=src python3 -m unittest discover -s tests -v
+          PYTHONPATH=src python3 -m unittest discover -s tests -v --buffer
           python3 scripts/secret_scan.py --tree . --git-history
       - name: Build release assets
         run: |

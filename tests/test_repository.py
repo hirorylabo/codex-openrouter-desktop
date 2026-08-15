@@ -26,6 +26,19 @@ def launcher_swift() -> str:
 
 
 class RepositoryTests(unittest.TestCase):
+    def http_error(self, code: int, message: str) -> urllib.error.HTTPError:
+        """テスト終了時に必ず閉じるHTTPError。
+
+        `HTTPError` は `urllib.response.addbase` 経由で `tempfile._TemporaryFileWrapper`
+        を継承しているため、closeしないままGCされると `ResourceWarning` を出す。
+        `fp` に何を渡すかとは無関係で、閉じることでしか消えない。
+        """
+        error = urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/generation?id=gen-test", code, message, {}, None
+        )
+        self.addCleanup(error.close)
+        return error
+
     def test_current_docs_have_no_retired_v01_commands_or_assets(self) -> None:
         texts = "\n".join(
             (ROOT / name).read_text(encoding="utf-8")
@@ -112,9 +125,7 @@ class RepositoryTests(unittest.TestCase):
         )
 
     def test_generation_metadata_retries_eventual_404(self) -> None:
-        not_found = urllib.error.HTTPError(
-            "https://openrouter.ai/api/v1/generation?id=gen-test", 404, "Not Found", {}, None
-        )
+        not_found = self.http_error(404, "Not Found")
         with (
             mock.patch.object(
                 doctor_module,
@@ -129,9 +140,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual([mock.call(2), mock.call(2)], sleep.call_args_list)
 
     def test_generation_metadata_does_not_retry_non_404(self) -> None:
-        unauthorized = urllib.error.HTTPError(
-            "https://openrouter.ai/api/v1/generation?id=gen-test", 401, "Unauthorized", {}, None
-        )
+        unauthorized = self.http_error(401, "Unauthorized")
         with (
             mock.patch.object(doctor_module, "authenticated_json", side_effect=unauthorized),
             mock.patch.object(doctor_module.time, "sleep") as sleep,

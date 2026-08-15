@@ -3,7 +3,7 @@
 
 ## 検証
 
-- [ ] `PYTHONPATH=src python3 -m unittest discover -s tests`
+- [ ] `PYTHONPATH=src python3 -m unittest discover -s tests --buffer`
 - [ ] `PYTHONPATH=src python3 -m compileall -q src portable scripts`
 - [ ] `PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py`
 - [ ] `python3 scripts/secret_scan.py --tree .`（release archiveも通す場合は `--archive`）
