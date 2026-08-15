@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-from pathlib import Path
 import stat
 
 from .app import UserPaths

@@ -27,6 +27,18 @@ jobs:
       - name: Python syntax
         run: python3 -m compileall -q src portable scripts
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # compileallは構文しか見ない。未定義名（F821）はここでしか止まらない。
+      - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: "0.16.3"
+          args: check --output-format=github
+
   audit-release:
     runs-on: ubuntu-latest
     steps:
@@ -66,20 +78,22 @@ jobs:
 
   ci-required:
     runs-on: ubuntu-latest
-    needs: [python-compat, audit-release, macos-compile]
+    needs: [python-compat, lint, audit-release, macos-compile]
     if: always()
     steps:
       - name: Verify required jobs succeeded
         env:
           PYTHON_COMPAT: ${{ needs.python-compat.result }}
+          LINT: ${{ needs.lint.result }}
           AUDIT_RELEASE: ${{ needs.audit-release.result }}
           MACOS_COMPILE: ${{ needs.macos-compile.result }}
         run: |
           echo "python-compat=$PYTHON_COMPAT"
+          echo "lint=$LINT"
           echo "audit-release=$AUDIT_RELEASE"
           echo "macos-compile=$MACOS_COMPILE"
           failed=0
-          for result in "$PYTHON_COMPAT" "$AUDIT_RELEASE" "$MACOS_COMPILE"; do
+          for result in "$PYTHON_COMPAT" "$LINT" "$AUDIT_RELEASE" "$MACOS_COMPILE"; do
             if [ "$result" != "success" ]; then
               failed=1
             fi
