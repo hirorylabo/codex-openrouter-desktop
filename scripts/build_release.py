@@ -65,9 +65,32 @@ def source_epoch() -> int:
     return int(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else 0
 
 
+def tracked_paths() -> set[str]:
+    """gitが追跡しているpath集合。
+
+    配布物の定義をfilesystem実体ではなくrepositoryの内容に固定する。作業ツリーだけに
+    ある`.DS_Store`のような無視対象ファイルと、gitが表現できない空ディレクトリが
+    成果物へ混入しない。
+    """
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("release build requires a git checkout: git ls-files failed")
+    entries = {entry.decode("utf-8") for entry in result.stdout.split(b"\0") if entry}
+    if not entries:
+        raise RuntimeError("git ls-files returned no tracked paths")
+    return entries
+
+
 def copy_allowlist(destination: Path) -> None:
+    tracked = tracked_paths()
     for name in FILES:
         source = ROOT / name
+        if name not in tracked:
+            raise RuntimeError(f"required release file is not tracked by git: {source}")
         if not source.is_file() or source.is_symlink():
             raise RuntimeError(f"required release file is missing or a symlink: {source}")
         shutil.copy2(source, destination / name)
@@ -75,18 +98,21 @@ def copy_allowlist(destination: Path) -> None:
         source = ROOT / name
         target = destination / name
         target.mkdir()
-        for path in sorted(source.rglob("*")):
-            relative = path.relative_to(source)
+        members = sorted(entry for entry in tracked if entry.startswith(f"{name}/"))
+        if not members:
+            raise RuntimeError(f"release directory has no tracked files: {source}")
+        for entry in members:
+            relative = Path(entry).relative_to(name)
             if any(part in EXCLUDED_PARTS for part in relative.parts):
                 continue
+            path = ROOT / entry
             if path.is_symlink():
                 raise RuntimeError(f"release allowlist refuses symlink: {path}")
+            if not path.is_file():
+                raise RuntimeError(f"tracked release path is not a regular file: {path}")
             output = target / relative
-            if path.is_dir():
-                output.mkdir(exist_ok=True)
-            elif path.is_file():
-                output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, output)
 
 
 def deterministic_tar(source: Path, target: Path, epoch: int) -> None:

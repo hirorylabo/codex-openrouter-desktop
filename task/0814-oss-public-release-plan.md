@@ -711,7 +711,7 @@ CIはfresh cloneなのでリリース成果物は現状clean。**公開済みの
   「配布物に不要なものを含めない」という本プロジェクトの主張と整合しない。
 - `secret_scan.py`にも`.DS_Store`の扱いはない。
 
-想定される直し方（未着手。別PRの判断事項）:
+想定される直し方（検討時の3案）:
 
 1. `EXCLUDED_PARTS`へ`.DS_Store`を足す（最小修正だが、他のOS固有ゴミには追随しない）。
 2. 収集元を`git ls-files`ベースへ変える（`.gitignore`と一致し、空ディレクトリ問題も同時に解消）。
@@ -719,8 +719,38 @@ CIはfresh cloneなのでリリース成果物は現状clean。**公開済みの
 
 本リリースの停止条件ではないため、v0.2.0公開後の別PRとして扱う。
 
+**対応済み（2026-08-15、案2＋案3を採用）。**
 
-**Dependabot PR 3本が open**（有効化直後に自動生成、いずれもCI green・SHA固定とversion comment維持）。
+案2を本修正、案3を後段ガードとして併用した。両者は別の失敗経路を塞ぐ:
+
+- 案2（`build_release.py`）: 収集を`tracked_paths()`（`git ls-files -z`）ベースへ変更。
+  作業ツリーだけにある無視対象ファイルと、gitが表現できない空ディレクトリが
+  構造的に入らなくなる。あわせて、追跡外のroot fileと非regular file（gitlink等）も
+  明示的に拒否するようにした。
+- 案3（`secret_scan.py`）: `os_junk_path()`を追加し`--archive`でのみ検査する。
+  案2を通り抜ける唯一の経路である「`.DS_Store`が誤ってcommitされ追跡対象になった場合」を
+  ここで落とす。作業ツリーには`.DS_Store`が正当に存在するため`--tree`では検査しない
+  （共有述語`forbidden_path`は変更していない）。
+
+検証:
+
+- 修正後のローカルビルドは 80 entry となり、公開済みv0.2.0 archiveと**ファイル一覧が完全一致**。
+  展開して再帰diffしても、差分は本変更で編集した`build_release.py`・`secret_scan.py`の2本のみ。
+  すなわち混入物だけが消え、配布内容は変わっていない。
+- 旧archive（`.DS_Store`入り）に`secret_scan.py --archive`をかけると4件を検出してFAIL、
+  修正後archiveはPASS、`--tree .`は従来どおりPASS。
+- 回帰テスト2件を`tests/test_maintenance.py`に追加（`ReleasePackagingTests`）。
+  旧collectorへ同じ表明を当てると違反5件（`.DS_Store` 4件 + 空ディレクトリ`portable/tests`）を
+  検出することを確認済みで、表明が空回りしていない。
+- unittest 253件、compileall、synthetic E2E、secret scan（tree + history）すべてPASS。
+
+なお回帰テストと`--archive`ガードはいずれも「ゴミが実在するマシン」でしか発火しない。
+CIはfresh cloneなので常に素通りする。混入を防いでいるのは案2の構造的変更であり、
+案3とテストはローカル実行時とcommit事故に対する網である。
+
+
+**Dependabot PR 3本**（有効化直後に自動生成、いずれもCI green・SHA固定とversion comment維持）。
+**2026-08-15に3本ともsquash mergeした（`3e029eb` / `afed8df` / `87eacbd`、main CI全7ジョブgreen）。**
 
 - [#6](https://github.com/hirorylabo/codex-openrouter-desktop/pull/6) `actions/attest` 4.1.1 → 4.2.2
 - [#7](https://github.com/hirorylabo/codex-openrouter-desktop/pull/7) `actions/checkout` 4.3.1 → 7.0.1
@@ -731,3 +761,21 @@ release workflowはtag pushでしか動かずCIでは一度も実行されない
 `setup-python`はv6→v7のmajor bumpであり、破綻した場合に露呈するのはpublic tagを押した瞬間で、
 計画どおりpublic tagのforce移動・再利用はできない。既存のpinはv0.1.1で実績のある組み合わせなので、
 既知良好なpinでv0.2.0を切ってからmergeする方が回復可能性が高い。
+
+merge前レビューで確認したもの:
+
+- 3本ともpin SHAが上流のtag refと一致（`attest` v4.2.2 / `checkout` v7.0.1 / `setup-python` v7.0.0）。
+  commitは`verified=true`、authorは`app/dependabot`。
+- major跨ぎの破壊的変更を各段で確認。`checkout` v5のNode24化（runner ≥ v2.327.1）は
+  GitHub-hosted runnerのみなので該当なし。v6の認証情報退避は全箇所`persist-credentials: false`で
+  no-op。v7の「`pull_request_target`/`workflow_run`でのfork PR checkoutをブロック」は
+  当リポジトリが`pull_request`と`push: tags`しか使わないため該当なし。
+  `setup-python` v7の唯一の破壊的変更（`pip-install`入力の削除）は未使用。
+- `attest` v4.2.0で入った`GITHUB_ARTIFACTS_LIST`からのsubject自動探索は、pin SHAの
+  `action.yml`を直接読んで「`subject-path`/`subject-digest`/`subject-checksums`のいずれも
+  無い場合のフォールバック」であることを確認。当方は`subject-path`を渡すので発動しない。
+- 3本を順に`git merge-tree`して衝突ゼロ、最終差分は2ファイル8行のみ。
+
+merge後、`checkout` v7 / `setup-python` v7 はmainへのpushで実行され、Python 3.11〜3.14の
+4マトリクス・secret scan・macOSコンパイルを通過した。`release.yml`の`attest` 4.2.2だけは
+次のtag pushまで未実測で、既存手順の`gh attestation verify`がそのまま検証点になる。

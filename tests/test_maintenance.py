@@ -11,7 +11,8 @@ from codex_openrouter import upgrade as upgrade_module
 from codex_openrouter.lifecycle import LifecycleLock
 from codex_openrouter.processes import matching_processes
 from codex_openrouter.promotion import PromotionError, atomic_promote, rollback_replacements
-from scripts.build_release import validate_release_version
+from scripts import secret_scan
+from scripts.build_release import copy_allowlist, tracked_paths, validate_release_version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,39 @@ class VersionAndAdapterTests(unittest.TestCase):
         for invalid in ("0.1.1", "v0.01.1", "v0.1.0", "v1.2.3-rc1"):
             with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
                 validate_release_version(invalid)
+
+
+class ReleasePackagingTests(unittest.TestCase):
+    def test_allowlist_ships_only_tracked_files_and_no_empty_directories(self) -> None:
+        """成果物の内容をrepositoryの内容に一致させる。
+
+        収集がfilesystem走査だった頃は、`.gitignore`済みの`.DS_Store`とgitが表現できない
+        空ディレクトリがmacOSのローカルビルドでだけ配布物へ入っていた。
+        """
+        tracked = tracked_paths()
+        with tempfile.TemporaryDirectory(prefix="release-allowlist-") as temporary:
+            staged = Path(temporary)
+            copy_allowlist(staged)
+            produced = sorted(path.relative_to(staged) for path in staged.rglob("*"))
+            self.assertTrue(produced)
+            for relative in produced:
+                path = staged / relative
+                if path.is_dir():
+                    self.assertTrue(any(path.iterdir()), f"empty directory shipped: {relative}")
+                else:
+                    self.assertIn(str(relative), tracked, f"untracked file shipped: {relative}")
+
+    def test_archive_scan_rejects_os_generated_files_the_tree_scan_tolerates(self) -> None:
+        for junk in (".DS_Store", "portable/.DS_Store", "._payload", "Thumbs.db", "desktop.ini"):
+            with self.subTest(junk=junk):
+                self.assertTrue(secret_scan.os_junk_path(junk))
+        for present_in_a_macos_checkout in (".DS_Store", "portable/.DS_Store", "._payload"):
+            with self.subTest(tolerated=present_in_a_macos_checkout):
+                # 作業ツリーには正当に存在するので、`--tree`が使う共有述語では弾かない
+                self.assertFalse(secret_scan.forbidden_path(present_in_a_macos_checkout))
+        for shipped in ("README.md", "models/registry.json", "src/codex_openrouter/cli.py"):
+            with self.subTest(shipped=shipped):
+                self.assertFalse(secret_scan.os_junk_path(shipped))
 
 
 class ProcessTests(unittest.TestCase):
