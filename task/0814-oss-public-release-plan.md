@@ -789,7 +789,7 @@ merge後、`checkout` v7 / `setup-python` v7 はmainへのpushで実行され、
 |---|---|
 | `main` | `97cbc70`、CI全7ジョブgreen、working tree clean |
 | release | `v0.2.0` prerelease公開済み、3 assets検証済み（provenance commit `812a983`） |
-| open PR / remote branch | なし（remoteは`main`のみ） |
+| open PR / remote branch | このPRのほか、本計画とは別taskの [#18](https://github.com/hirorylabo/codex-openrouter-desktop/pull/18) / [#19](https://github.com/hirorylabo/codex-openrouter-desktop/pull/19)（`cli`の遅延importで壊れた`rollback`・`migrate`の修正と、lintゲート・テスト出力の整備）が開いている |
 | repository設定 | `deleteBranchOnMerge`有効、CodeQL default setup、main ruleset（required check = `ci-required`） |
 | 利用者環境 | 実機テスト前の状態へ復元済み。profile digest `1a952c93…`、install-manifestはbyte-identical、`doctor` RESULT: PASS |
 
@@ -821,6 +821,22 @@ filesystem走査ではないので、ローカルの無視対象ファイルや�
 
 実機E2Eのうち一部は利用者の対話操作を要するため未実施のまま。詳細は「Phase 5 実機リリースゲート」
 の節を参照。v0.2.0はprereleaseとして公開済みなので、正式release昇格を検討する際はここを埋める。
+
+**4. CIにlintゲートがある（この計画の後、別taskで追加）**
+
+CIの`lint` jobが`ruff`（`ruff.toml`、`E9`と`F`のみ）を実行し、`ci-required`の集約対象に入っている。
+`compileall`は構文しか見ないので、未定義名（`F821`）を止めているのはこのjobだけ。
+ローカルでは`uvx ruff@0.16.3 check .`で同じ検査が走る。ruff本体のversionはworkflowに明示固定
+してあり（Dependabotの対象外）、`astral-sh/ruff-action`のSHAは既存のDependabotが追従する。
+
+unittestは`--buffer`付きで回す。外すとgreen runでも100行超が出て、その中に`doctor.py`由来の
+`FAIL:`が混ざり、本物の失敗が読めなくなる。
+
+`mock.patch`は定義側moduleではなく**使う側**へ当てる。`cli`がmodule levelでimportした名前は
+import時に`cli`へ束縛されるので、定義側へのpatchは素通りして本物が動く。
+経緯と根拠は`task/0815-cli-import-hardening.md`と`task/0815-test-output-hygiene.md`にある
+（PR [#18](https://github.com/hirorylabo/codex-openrouter-desktop/pull/18) /
+[#19](https://github.com/hirorylabo/codex-openrouter-desktop/pull/19)）。
 
 ### 参照
 
