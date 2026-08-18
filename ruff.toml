@@ -1,0 +1,13 @@
+# 実行時に落ちる誤りだけを止める。styleは対象にしない。
+#
+# compileallは構文しか見ないので、未定義名（F821）を検出できない。
+# `rollback` と `migrate` が関数ローカルimportのscope取り違えで NameError を出した経緯は
+# task/0815-cli-import-hardening.md を参照。
+
+target-version = "py311"
+# 拡張子の無いentry point。ここを外すと ./codex-openrouter が検査対象から漏れる。
+extend-include = ["codex-openrouter"]
+
+[lint]
+# E9: 構文・IOエラー / F: pyflakes相当（F401 未使用import、F821 未定義名）
+select = ["E9", "F"]

@@ -18,10 +18,16 @@ from .auth import (
     temporary_store,
 )
 from . import configblock
-from .lifecycle import LifecycleLock
+from .install import InstallError, _install_unlocked
+from .lifecycle import LifecycleLock, LifecycleLockError
+from . import modelcatalog
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
 from .profile import ProfileError, ResolvedProfile, installed_profile
+from .promotion import PromotionError, atomic_promote, rollback_replacements
+from . import settings
+from .supervisor import Supervisor, SupervisorError
+from .upgrade import UpgradeError, auto_upgrade, upgrade
 
 
 class CliError(RuntimeError):
@@ -117,8 +123,6 @@ def _setup_locked(args: argparse.Namespace, paths: UserPaths) -> int:
     finally:
         if temporary is not None:
             temporary.cleanup()
-    from .install import _install_unlocked
-
     return _install_unlocked(
         root(),
         paths,
@@ -171,8 +175,6 @@ def rollback_command(_args: argparse.Namespace) -> int:
 
     案Dでは純正appを触らないので、復元対象はこのツール自身のファイルだけ。
     """
-    from .promotion import atomic_promote, rollback_replacements
-
     paths = UserPaths.current()
     with LifecycleLock(paths):
         return _rollback_locked(paths)
@@ -203,8 +205,6 @@ def _rollback_locked(paths: UserPaths) -> int:
     rollback_backup = upgrade_root / f"manual-rollback-{timestamp}"
 
     def verify() -> None:
-        from .supervisor import Supervisor
-
         registry_path = paths.support_root / "models/registry.json"
         _selected, profile = installed_profile(registry_path, paths)
         if paths.shared_config.is_file():
@@ -220,8 +220,6 @@ def _rollback_locked(paths: UserPaths) -> int:
 
 def launch_command(args: argparse.Namespace) -> int:
     """事前処理をしてから純正appを起動し、終了したら後始末する。"""
-    from .supervisor import Supervisor
-
     paths = UserPaths.current()
     assert_apple_silicon()
     workspace = Path(args.path).expanduser().resolve() if args.path else None
@@ -240,8 +238,6 @@ def migrate_command(args: argparse.Namespace) -> int:
     旧 ~/.codex-openrouter は消さない。OpenRouterで記録した旧threadがあるため、
     読み取り専用のbackupとして残す。
     """
-    from .supervisor import Supervisor
-
     paths = UserPaths.current()
     with LifecycleLock(paths):
         return _migrate_locked(args, paths)
@@ -330,8 +326,6 @@ def compact_legacy_home(home: Path) -> str:
 
 def profile_command(args: argparse.Namespace) -> int:
     """設定画面の読み書き口。SwiftはこのJSONだけを見る。"""
-    from . import settings
-
     paths = UserPaths.current()
     registry_path = root() / "models/registry.json"
     if args.profile_action == "show":
@@ -348,8 +342,6 @@ def models_command(args: argparse.Namespace) -> int:
     利用量は「接続数」ではなく**トークン総数**。OpenRouterが公開しているのが
     それだけで、しかも日次トップ50に限られる。圏外のmodelは値を持たない。
     """
-    from . import modelcatalog
-
     paths = UserPaths.current()
     registry = json.loads((root() / "models/registry.json").read_text(encoding="utf-8"))
 
@@ -401,8 +393,6 @@ def guard_log_command(args: argparse.Namespace) -> int:
 
 
 def upgrade_command(args: argparse.Namespace) -> int:
-    from .upgrade import auto_upgrade, upgrade
-
     paths = UserPaths.current()
     if args.if_needed:
         return auto_upgrade(paths, args.profile)
@@ -497,21 +487,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .install import InstallError
-    from .lifecycle import LifecycleLockError
-    from .modelcatalog import CatalogError
-    from .promotion import PromotionError
-    from .settings import SettingsError
-    from .supervisor import SupervisorError
-    from .upgrade import UpgradeError
-
     try:
         args = build_parser().parse_args(argv)
         return int(args.func(args))
     except (
         AppError,
         AuthenticationError,
-        CatalogError,
+        modelcatalog.CatalogError,
         configblock.ConfigBlockError,
         InstallError,
         LifecycleLockError,
@@ -519,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         ProfileError,
         ProcessError,
         PromotionError,
-        SettingsError,
+        settings.SettingsError,
         SupervisorError,
         UpgradeError,
         CliError,
