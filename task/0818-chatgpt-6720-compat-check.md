@@ -144,24 +144,33 @@ raise SystemExit(run(UserPaths.current(), Path('models/registry.json')))"
   current = 6720 / 26.814.41407）し、同じbuildで組み直しても `.previous` は6662のまま。
   snapshotは38,577 bytes / 0600
 
-### 実機E2E（6662分と合流。app終了状態で実施）
+### 実機E2E（6662分と合流。2026-08-18 実施・全項目PASS）
 
-6662のE2Eはlauncherのクリック前にappが更新されたため未完（`supervisor.json` はまだ
-`6396` / `active=false`、`~/.codex/model-catalogs/` は空）。6720でまとめて実施する。
+6662のE2Eはlauncherのクリック前にappが更新されたため未完だった（`supervisor.json` は
+`6396` / `active=false`、`~/.codex/model-catalogs/` は空）。6720でまとめて実施した。
 
-1. `codex-openrouter upgrade` — `install-manifest.json` の `chatgpt_version` が
-   `26.814.41407` / `6720` へ、`source_commit` が新HEADへ更新されること
-   （このフィールドは書くだけで誰も読まないので、6662のままでも機能影響は無かった）
-2. Desktopの `Codex OpenRouter.app` → 「OpenRouterで起動」→ pickerにnative 5 + OR 5 の10件
-3. `~/.codex/model-catalogs/codex-openrouter.json` が再生成され、OR entryの
+1. **PASS** `codex-openrouter upgrade` → `install-manifest.json` の `chatgpt_version` が
+   `26.814.41407` / `6720`、`source_commit` が `35ac803` へ更新。促進された
+   `current/src/codex_openrouter/catalog.py` に中和2件とsnapshotが入っている
+   （`chatgpt_version` は書くだけで誰も読まないので、6662のままでも機能影響は無かった）
+2. **PASS** Desktopの `Codex OpenRouter.app` → 「OpenRouterで起動」→ picker 10件
+   （`GPT-5.6-Sol` / `Terra` / `Luna` / `5.5` / `5.2` + `[OR]` 5件がpriority順で後ろに並ぶ）
+3. **PASS** catalogが再生成され（13件 / picker 10件 / 510,093 bytes）、OR entry 5件すべてで
    `include_apps_usage_instructions` / `node_repl_disabled` / `node_repl_auto_review_required`
-   がいずれも `false`、`multi_agent_version` が `null` であること
-4. `state/clone-template.json` がbuild `6720` で作られること（`.previous` はまだ出来ない。
-   旧buildのsnapshotが無いため。実際の差分検知が効くのは次回のapp更新から）
-5. `supervisor.json` の `version`/`build` が `26.814.41407` / `6720` になること
-6. ORモデルで1ターン流し、`guard.log` に `decision: forwarded` が残ること
-7. `codex-openrouter doctor --runtime --secret-scan` がPASS
-8. 終了後に純正ChatGPT.appを単体起動しvanilla（catalog block無し）へ戻ること
+   が `false`、`multi_agent_version` が `null`
+4. **PASS** `state/clone-template.json` がbuild `6720` / version `26.814.41407` /
+   schema_version 1 / テンプレート38フィールド / 38,577 bytes / 0600 で作られた。
+   `.previous` は予告どおり出来ていない（旧buildのsnapshotが無いため。実際の差分検知が
+   効くのは次回のapp更新から）
+5. **PASS** `supervisor.json` が `26.814.41407` / `6720` / `active=true` / `guard_port=54942`
+6. **PASS** `[OR] DeepSeek V4 Flash` で1ターン → 正常応答。`guard.log` は
+   `forwarded deepseek/deepseek-v4-flash-0731 status=200` が1件、
+   ambient背景threadの `denied gpt-5.6-luna` が3件。allowlistが意図どおり効いている
+7. **PASS** `codex-openrouter doctor --runtime --secret-scan`
+   （WARNはshellの `OPENROUTER_API_KEY` export 1件のみ。ランチャーが起動前に外すので既知・無害）
+8. **PASS** ⌘Q後にvanillaへ復帰。catalog block 0件、provider blockは非接続stub
+   `http://127.0.0.1:0/v1`、`active=false` / `guard_port=None` / `guard_nonce=None`、
+   guard token削除済み。catalogとsnapshotはbuildが同じなので保持される（次回起動で組み直さない）
 
 ## 別件（今回は触らない）
 
@@ -170,7 +179,14 @@ raise SystemExit(run(UserPaths.current(), Path('models/registry.json')))"
 - `upgrade` が「API keyのspend limitが未設定です」と警告している。READMEは必須としている
 - open PR #17 / #18 / #19 は未マージ（#18 が `cli.py` のF821を直す）
 
+## 残っている確認
+
+ターンはテキストのみで流したので、`tool_mode: code_mode_only` + `node_repl_disabled: false` の
+組み合わせでORモデルが実際にJS REPLを使えるかは未検証。中和値はnativeと同値なので
+6720以前と挙動は変わらないはずだが、ツールを使うプロンプトを1つ流せば裏付けになる。
+
 ## Status
 
-- 2026-08-18: 調査完了（支障なし）。実装とリポジトリ側のVerificationまで完了。
-  実機E2E（上記8項目）はapp終了状態での操作が要るため未実施。
+- 2026-08-18: **完了**。調査（支障なし）→ 実装 → リポジトリ側Verification → PR #21 を
+  squash-merge（main `35ac803`）→ 実機E2E 全8項目PASS。
+  作業branchは archive tag `archive/catalog-node-repl-6720-114ebf3` でSHAを保全して削除した。
