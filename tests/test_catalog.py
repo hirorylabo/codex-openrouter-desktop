@@ -14,7 +14,7 @@ REGISTRY = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"
 
 
 def native(slug: str, visibility: str = "list", priority: int = 1) -> dict:
-    """build 6396のbundled entryの形を最小限で再現したfixture。"""
+    """build 6662のbundled entryの形を最小限で再現したfixture。"""
     return {
         "slug": slug,
         "display_name": slug.upper(),
@@ -32,6 +32,7 @@ def native(slug: str, visibility: str = "list", priority: int = 1) -> dict:
         "supports_parallel_tool_calls": True,
         "supported_in_api": True,
         "multi_agent_version": "v2",
+        "include_apps_usage_instructions": True,
         "additional_speed_tiers": ["fast"],
         "service_tiers": [{"id": "priority", "name": "Fast"}],
         "availability_nux": {"message": "..."},
@@ -54,6 +55,17 @@ class TemplateTests(unittest.TestCase):
     def test_rejects_catalog_without_listed_native(self):
         with self.assertRaises(catalog.CatalogError):
             catalog.clone_template([native("only-hidden", visibility="hide")])
+
+    def test_known_fields_cover_the_current_template(self):
+        self.assertEqual(catalog.unknown_template_fields(NATIVES), [])
+
+    def test_reports_fields_the_stock_build_added(self):
+        # 純正appがフィールドを増やすとcloneが黙って継ぐ。継承そのものは止めず、
+        # 気づけるようにする。
+        grown = native("gpt-grown") | {"brand_new_capability": True}
+        self.assertEqual(
+            catalog.unknown_template_fields([grown]), ["brand_new_capability"]
+        )
 
 
 class BuildTests(unittest.TestCase):
@@ -85,6 +97,20 @@ class BuildTests(unittest.TestCase):
         for slug in REGISTRY:
             self.assertIsNone(self.by_slug[slug]["multi_agent_version"])
         self.assertEqual(self.by_slug["gpt-first"]["multi_agent_version"], "v2")
+
+    def test_neutralised_values_keep_the_native_type(self):
+        """boolフィールドをNoneで潰さないこと。
+
+        codexのcatalog deserializerは型を要求し、boolをnullにすると
+        `invalid type: null, expected a boolean` でcatalog全体を拒否する。
+        1件でも型を外すとpickerからORモデルが丸ごと消える。
+        """
+        for slug in REGISTRY:
+            value = self.by_slug[slug]["include_apps_usage_instructions"]
+            self.assertIs(value, False)
+        self.assertIs(
+            self.by_slug["gpt-first"]["include_apps_usage_instructions"], True
+        )
 
     def test_openrouter_priorities_sort_after_natives(self):
         highest_native = max(m["priority"] for m in NATIVES)
@@ -119,6 +145,21 @@ class ValidateTests(unittest.TestCase):
 
     def test_rejects_when_no_native_remains(self):
         self.document["models"] = [m for m in self.document["models"] if m["slug"] in REGISTRY]
+        self._expect_error(self.document)
+
+    def test_rejects_unneutralised_native_only_field(self):
+        slug = next(iter(REGISTRY))
+        for model in self.document["models"]:
+            if model["slug"] == slug:
+                model["include_apps_usage_instructions"] = True
+        self._expect_error(self.document)
+
+    def test_rejects_native_only_field_neutralised_to_the_wrong_type(self):
+        # `0 == False` なので、値だけを見るとbool中和漏れを見逃す。
+        slug = next(iter(REGISTRY))
+        for model in self.document["models"]:
+            if model["slug"] == slug:
+                model["include_apps_usage_instructions"] = 0
         self._expect_error(self.document)
 
     def test_rejects_effort_drift_from_registry(self):
@@ -186,6 +227,54 @@ class InstalledBuildTests(unittest.TestCase):
             self.assertEqual(len(listed), len(REGISTRY) + sum(
                 1 for m in natives if m.get("visibility") == "list"
             ))
+
+    def test_installed_template_has_no_unknown_fields(self):
+        """実機buildのテンプレートが既知集合を超えていないこと。
+
+        超えていたら、cloneがその新フィールドをOpenRouter entryへ黙って
+        引き継いでいる。`catalog.NATIVE_ONLY_FIELDS` に足すか、既知集合へ
+        足して「継がせてよい」と明示するかを判断してから緑に戻すこと。
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            natives = catalog.bundled_models(self.CODEX, Path(directory))
+        self.assertEqual(catalog.unknown_template_fields(natives), [])
+
+    def test_installed_codex_accepts_the_generated_catalog(self):
+        """組み上げたcompositeを実機codexが読めること。
+
+        `validate` は自前の契約しか見ない。中和値の型を外すと codex 側が
+        catalog 全体を拒否してpickerからORモデルが消えるが、それはここでしか
+        捕まらない。
+        """
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            home.mkdir()
+            natives = catalog.bundled_models(self.CODEX, home)
+            composite = Path(directory) / "composite.json"
+            composite.write_text(
+                json.dumps(catalog.build(natives, REGISTRY)), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    str(self.CODEX),
+                    "debug",
+                    "models",
+                    "-c",
+                    f"model_catalog_json={composite}",
+                ],
+                env={"CODEX_HOME": str(home), "PATH": "/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr.strip()[:400])
+        loaded = {m["slug"] for m in json.loads(result.stdout)["models"]}
+        self.assertTrue(set(REGISTRY) <= loaded)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from .app import (
     write_json,
 )
 from .auth import CredentialStore
+from . import catalog
 from . import configblock
 from .lifecycle import LifecycleLock, LifecycleLockError
 from .openrouter import validate_key_and_profile
@@ -336,7 +337,7 @@ def promote_runtime(
         run(["/bin/zsh", "-n", str(stage_bin / "codex-openrouter-app")])
         build_launcher(source_root, stage_launcher, workspace, paths.state_dir / "logs/launcher.log")
 
-        replacements: list[tuple[Path, Path]] = [(stage_support, paths.support_root)]
+        replacements: list[tuple[Path | None, Path]] = [(stage_support, paths.support_root)]
         replacements.extend((stage_bin / name, paths.bin_dir / name) for name in BINARIES)
         replacements.extend(
             (
@@ -345,6 +346,12 @@ def promote_runtime(
                 (stage_state / "profile.json", paths.installed_profile),
                 (stage_state / "supervisor.json", paths.supervisor_state),
             )
+        )
+        # 旧catalogを落として次回起動で組み直させる。cloneの中和規則が変わっても
+        # 純正appのbuildが同じだと `refresh_catalog_if_needed` は素通りするので、
+        # 消しておかないと古い規則のcatalogが使われ続ける。
+        replacements.extend(
+            (None, stale) for stale in catalog.stale_paths(paths.composite_catalog)
         )
 
         def verify_live() -> None:
