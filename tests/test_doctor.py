@@ -131,6 +131,49 @@ class TemplateCheckTests(DoctorTestCase):
         self.assertTrue(self.doctor.warnings)
 
 
+class TemplateSnapshotCheckTests(DoctorTestCase):
+    """前回catalogを組んだbuildとの差分。純正appの更新から次回起動までの窓で鳴る。"""
+
+    TEMPLATE = {"slug": "gpt-x", "display_name": "X", "visibility": "list"}
+
+    def write_snapshot(self, build: str, template: dict) -> None:
+        self.paths.state_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.clone_template_snapshot.write_text(
+            json.dumps({"schema_version": 1, "version": "26.1", "build": build,
+                        "template": template}),
+            encoding="utf-8",
+        )
+
+    def _run_with(self, natives, build="6720"):
+        with mock.patch.object(doctor_module, "stock_build_id", return_value=("26.2", build)):
+            doctor_module.check_catalog_template_snapshot(self.doctor, self.paths, natives)
+
+    def test_no_snapshot_says_nothing(self):
+        # 初回起動前はsnapshotが無い。そのことを利用者へ報告しても行動に繋がらない。
+        self._run_with([self.TEMPLATE])
+        self.assertEqual(self.doctor.warnings, [])
+        self.assertEqual(self.doctor.failures, [])
+
+    def test_same_build_says_nothing(self):
+        self.write_snapshot("6720", self.TEMPLATE)
+        self._run_with([self.TEMPLATE | {"brand_new_capability": True}])
+        self.assertEqual(self.doctor.warnings, [])
+
+    def test_new_build_reports_the_moved_field_names(self):
+        self.write_snapshot("6662", self.TEMPLATE)
+        self._run_with([self.TEMPLATE | {"brand_new_capability": True}])
+        self.assertEqual(self.doctor.failures, [])
+        self.assertTrue(
+            any("brand_new_capability" in w and "6662" in w for w in self.doctor.warnings),
+            self.doctor.warnings,
+        )
+
+    def test_new_build_with_identical_template_says_nothing(self):
+        self.write_snapshot("6662", self.TEMPLATE)
+        self._run_with([self.TEMPLATE])
+        self.assertEqual(self.doctor.warnings, [])
+
+
 class ManifestCheckTests(DoctorTestCase):
     def setUp(self):
         super().setUp()

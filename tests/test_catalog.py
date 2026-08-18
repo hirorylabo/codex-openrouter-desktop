@@ -14,7 +14,7 @@ REGISTRY = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"
 
 
 def native(slug: str, visibility: str = "list", priority: int = 1) -> dict:
-    """build 6662のbundled entryの形を最小限で再現したfixture。"""
+    """build 6720のbundled entryの形を最小限で再現したfixture。"""
     return {
         "slug": slug,
         "display_name": slug.upper(),
@@ -33,6 +33,8 @@ def native(slug: str, visibility: str = "list", priority: int = 1) -> dict:
         "supported_in_api": True,
         "multi_agent_version": "v2",
         "include_apps_usage_instructions": True,
+        "node_repl_auto_review_required": False,
+        "node_repl_disabled": False,
         "additional_speed_tiers": ["fast"],
         "service_tiers": [{"id": "priority", "name": "Fast"}],
         "availability_nux": {"message": "..."},
@@ -111,6 +113,18 @@ class BuildTests(unittest.TestCase):
         self.assertIs(
             self.by_slug["gpt-first"]["include_apps_usage_instructions"], True
         )
+
+    def test_does_not_disable_the_local_js_repl(self):
+        """否定形フィールドを「無効化」側へ倒さないこと。
+
+        `node_repl_disabled` の中和は、native側が将来この値を反転させても
+        cloneが追随しないよう固定するのが目的で、無効化が目的ではない。
+        `True` にするとテンプレートの `tool_mode: code_mode_only` と噛み合って
+        ORモデルからツールを丸ごと奪いかねない。
+        """
+        for slug in REGISTRY:
+            self.assertIs(self.by_slug[slug]["node_repl_disabled"], False)
+            self.assertIs(self.by_slug[slug]["node_repl_auto_review_required"], False)
 
     def test_openrouter_priorities_sort_after_natives(self):
         highest_native = max(m["priority"] for m in NATIVES)
@@ -204,6 +218,101 @@ class WriteTests(unittest.TestCase):
             self.assertTrue(previous.is_file())
             self.assertNotIn("CHANGED", previous.read_text(encoding="utf-8"))
             self.assertIn("CHANGED", target.read_text(encoding="utf-8"))
+
+
+class SnapshotTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "state" / "clone-template.json"
+        self.previous = catalog.previous_path(self.path)
+
+    def test_records_the_template_of_the_build_it_ran_on(self):
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6720")
+        saved = catalog.read_snapshot(self.path)
+        self.assertEqual(saved["build"], "6720")
+        self.assertEqual(saved["version"], "26.1")
+        self.assertEqual(saved["template"]["slug"], "gpt-first")
+        self.assertFalse(self.previous.exists())
+
+    def test_same_build_does_not_rotate(self):
+        # profile変更でcatalogを組み直すたびにrotateすると、`.previous` が同じbuildで
+        # 埋まって比較対象の旧buildが消える。
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6720")
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6720")
+        self.assertFalse(self.previous.exists())
+
+    def test_new_build_rotates_the_old_one(self):
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6662")
+        grown = [n | {"brand_new_capability": True} for n in NATIVES]
+        catalog.snapshot_template(grown, self.path, version="26.2", build="6720")
+        self.assertEqual(catalog.read_snapshot(self.previous)["build"], "6662")
+        self.assertEqual(catalog.read_snapshot(self.path)["build"], "6720")
+
+    def test_reports_field_names_that_moved(self):
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6662")
+        snapshot = catalog.read_snapshot(self.path)
+        changed = [
+            n | {"brand_new_capability": True, "context_window": 1}
+            for n in NATIVES
+        ]
+        for entry in changed:
+            entry.pop("shell_type")
+        self.assertEqual(
+            catalog.template_field_drift(snapshot, changed),
+            {
+                "added": ["brand_new_capability"],
+                "removed": ["shell_type"],
+                "changed": ["context_window"],
+            },
+        )
+
+    def test_identical_template_reports_no_drift(self):
+        catalog.snapshot_template(NATIVES, self.path, version="26.1", build="6662")
+        drift = catalog.template_field_drift(catalog.read_snapshot(self.path), NATIVES)
+        self.assertEqual(drift, {"added": [], "removed": [], "changed": []})
+
+    def test_generate_records_the_snapshot_after_the_catalog_lands(self):
+        from unittest import mock
+
+        output = Path(self.directory.name) / "catalogs" / "composite.json"
+        with mock.patch.object(catalog, "bundled_models", return_value=NATIVES), \
+             mock.patch.object(catalog.pricing, "resolve", return_value=None):
+            catalog.generate(
+                Path("/nonexistent/codex"),
+                Path(self.directory.name),
+                ROOT / "models/registry.json",
+                output,
+                snapshot=self.path,
+                build_id=("26.1", "6720"),
+            )
+        self.assertTrue(output.is_file())
+        self.assertEqual(catalog.read_snapshot(self.path)["build"], "6720")
+
+    def test_generate_without_a_snapshot_path_writes_nothing(self):
+        from unittest import mock
+
+        output = Path(self.directory.name) / "catalogs" / "composite.json"
+        with mock.patch.object(catalog, "bundled_models", return_value=NATIVES), \
+             mock.patch.object(catalog.pricing, "resolve", return_value=None):
+            catalog.generate(
+                Path("/nonexistent/codex"),
+                Path(self.directory.name),
+                ROOT / "models/registry.json",
+                output,
+            )
+        self.assertFalse(self.path.exists())
+
+    def test_unreadable_snapshot_is_not_an_error(self):
+        # snapshotは診断の補助でしかない。読めないことでdoctorや生成を落とさない。
+        self.assertIsNone(catalog.read_snapshot(self.path))
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{ not json", encoding="utf-8")
+        self.assertIsNone(catalog.read_snapshot(self.path))
+        self.path.write_text('{"build": "6720"}', encoding="utf-8")
+        self.assertIsNone(catalog.read_snapshot(self.path))
 
 
 class InstalledBuildTests(unittest.TestCase):

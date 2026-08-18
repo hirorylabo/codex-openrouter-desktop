@@ -25,7 +25,7 @@ import urllib.request
 
 from . import catalog as catalog_module
 from . import configblock
-from .app import UserPaths
+from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .profile import active_registry, installed_profile
 from .supervisor import CATALOG_BLOCK, PROVIDER_BLOCK, State
@@ -315,6 +315,10 @@ def check_catalog_template(doctor: Doctor, paths: UserPaths) -> None:
 
     未知フィールドが即座に有害とは限らないのでwarnに留める。継がせるか中和するかは
     `catalog.NATIVE_ONLY_FIELDS` を見て人間が決める。
+
+    あわせて、前回catalogを組んだbuildのテンプレート（snapshot）とも比べる。
+    未知フィールド検査は名前の増加しか見ないので、値だけが変わる更新を素通りする。
+    純正appの更新から次回起動までの窓でだけ差分が出る。
     """
     try:
         natives = catalog_module.bundled_models(paths.stock_codex, paths.shared_home)
@@ -327,8 +331,33 @@ def check_catalog_template(doctor: Doctor, paths: UserPaths) -> None:
             "cloneテンプレートに未知フィールドがあります"
             f"（OpenRouter entryが継いでいます）: {unknown}"
         )
+    else:
+        doctor.ok("cloneテンプレートは既知のフィールドだけで構成されています")
+    check_catalog_template_snapshot(doctor, paths, natives)
+
+
+def check_catalog_template_snapshot(
+    doctor: Doctor, paths: UserPaths, natives: list[dict]
+) -> None:
+    """snapshotを取ったbuildと実機buildが違うなら、テンプレートの差分を出す。"""
+    snapshot = catalog_module.read_snapshot(paths.clone_template_snapshot)
+    if snapshot is None:
         return
-    doctor.ok("cloneテンプレートは既知のフィールドだけで構成されています")
+    try:
+        _, build = stock_build_id(paths.stock_app)
+    except AppError as exc:
+        doctor.warn(f"純正appのbuildを読めません: {exc}")
+        return
+    if snapshot.get("build") == build:
+        return
+    drift = catalog_module.template_field_drift(snapshot, natives)
+    moved = {kind: names for kind, names in drift.items() if names}
+    if not moved:
+        return
+    doctor.warn(
+        f"cloneテンプレートがbuild {snapshot.get('build')} から変わっています"
+        f"（フィールド名のみ）: {moved}"
+    )
 
 
 def check_guard(doctor: Doctor, paths: UserPaths) -> None:

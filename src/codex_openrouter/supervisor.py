@@ -221,6 +221,8 @@ class Supervisor:
             self.registry_path,
             self.paths.composite_catalog,
             model_ids=self.profile.models,
+            snapshot=self.paths.clone_template_snapshot,
+            build_id=(version, build),
         )
         self.state.version, self.state.build = version, build
         self.state.catalog_profile_digest = self.profile.digest
