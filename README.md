@@ -244,7 +244,7 @@ codex-openrouter auth logout
 ## 開発
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m unittest discover -s tests -v --buffer
 PYTHONPATH=src python3 -m compileall -q src portable scripts
 PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
 xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
