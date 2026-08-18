@@ -82,6 +82,15 @@ class UserPaths:
         return self.state_dir / "guard-token"
 
     @property
+    def clone_template_snapshot(self) -> Path:
+        """1つ前のbuildと比べるためのcloneテンプレート。
+
+        state_dirはupgradeのpromotion対象外なので、純正appの更新をまたいで残る。
+        `catalog.stale_paths` にも含めない（消したら比較対象が無くなる）。
+        """
+        return self.state_dir / "clone-template.json"
+
+    @property
     def install_manifest(self) -> Path:
         return self.state_dir / "install-manifest.json"
 

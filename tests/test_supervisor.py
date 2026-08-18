@@ -213,6 +213,17 @@ class UpdateFollowTests(SupervisorTestCase):
             self.assertTrue(self.supervisor.refresh_catalog_if_needed())
         self.assertEqual(len(calls), 2)
 
+    def test_catalog_refresh_hands_the_snapshot_path_and_build(self):
+        """次のapp更新でテンプレート差分を取れるよう、生成時にsnapshotを残させる。"""
+        with mock.patch.object(sup, "stock_build_id", return_value=("26.2", "6720")), \
+             mock.patch.object(
+                 sup.catalog, "generate", return_value=self.paths.composite_catalog
+             ) as generate:
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+        kwargs = generate.call_args.kwargs
+        self.assertEqual(kwargs["snapshot"], self.paths.clone_template_snapshot)
+        self.assertEqual(kwargs["build_id"], ("26.2", "6720"))
+
     def test_catalog_is_regenerated_when_the_profile_changes(self):
         """設定変更後の次回起動で、選択モデルだけのcatalogへ組み直す。"""
         model = "minimax/minimax-m3"

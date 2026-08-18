@@ -19,6 +19,8 @@ from . import pricing
 
 OR_PREFIX = "[OR] "
 
+SNAPSHOT_SCHEMA_VERSION = 1
+
 # nativeだけが持つ能力フィールド。cloneが継ぐとOpenRouterモデルが
 # native由来の機能を主張することになるので中和する。
 #
@@ -31,6 +33,13 @@ NATIVE_ONLY_FIELDS: dict[str, Any] = {
     "multi_agent_version": None,
     # Apps(Connectors)はChatGPTアカウント側の機能。build 6662で新設された。
     "include_apps_usage_instructions": False,
+    # auto reviewはnative側の仕組み。ORモデルをそれでgateしない。build 6720で新設。
+    "node_repl_auto_review_required": False,
+    # 否定形フィールド。中和値は `True` にしないこと。
+    # `True` は「JS REPLを無効化」の意味で、テンプレートは `tool_mode: code_mode_only`
+    # なのでORモデルからツールを丸ごと奪いかねない。ここでの中和の目的は無効化ではなく、
+    # native側が将来この値を反転させてもcloneが追随しないよう固定することにある。
+    "node_repl_disabled": False,
 }
 
 # cloneが継ぐと誤解を招く提示用フィールド。
@@ -41,7 +50,7 @@ RESET_FIELDS: dict[str, Any] = {
     "service_tiers": [],
 }
 
-# build 6662のcloneテンプレートが持つフィールド。純正appの更新でここに無い
+# build 6720のcloneテンプレートが持つフィールド。純正appの更新でここに無い
 # フィールドが現れたら、cloneがそれを黙って継いでいる合図になる。
 # 「取り得る全フィールド」ではなく「いまテンプレートが実際に持つもの」を数える。
 KNOWN_TEMPLATE_FIELDS = frozenset(
@@ -66,6 +75,8 @@ KNOWN_TEMPLATE_FIELDS = frozenset(
         "max_context_window",
         "model_messages",
         "multi_agent_version",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
         "priority",
         "service_tiers",
         "shell_type",
@@ -258,17 +269,81 @@ def stale_paths(path: Path) -> list[Path]:
     ]
 
 
+def _write_atomic(document: dict, path: Path) -> Path:
+    """JSONを原子的に置換する。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+    return path
+
+
 def write(document: dict, path: Path) -> Path:
     """検証済みcatalogを原子的に置換し、1世代前を残す。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         previous = previous_path(path)
         previous.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    tmp.chmod(0o600)
-    tmp.replace(path)
-    return path
+    return _write_atomic(document, path)
+
+
+def read_snapshot(path: Path) -> dict | None:
+    """cloneテンプレートのsnapshotを読む。無い・壊れているならNone。
+
+    snapshotは診断の補助でしかないので、読めないことをエラーにしない。
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or not isinstance(document.get("template"), dict):
+        return None
+    return document
+
+
+def snapshot_template(natives: list[dict], path: Path, *, version: str, build: str) -> Path:
+    """cloneテンプレートを1世代残す。
+
+    次のapp更新で、フィールドの増減だけでなく値の変化まで機械的に取れるようにする。
+    `unknown_template_fields` は名前の増加しか見ないので、値だけが変わる更新は素通りする。
+
+    `.previous` には常に「1つ前のbuild」を置きたいので、buildが変わっていないときは
+    rotateしない。profile変更のたびにrotateすると `.previous` が同じbuildで埋まり、
+    比較対象の旧buildが消える。
+    """
+    current = read_snapshot(path)
+    if current is not None and current.get("build") != build:
+        previous_path(path).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return _write_atomic(
+        {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "version": version,
+            "build": build,
+            "template": clone_template(natives),
+        },
+        path,
+    )
+
+
+def template_field_drift(snapshot: dict, natives: list[dict]) -> dict[str, list[str]]:
+    """snapshotのテンプレートと現在のテンプレートの、フィールド名の差分。
+
+    値そのものは返さない。`base_instructions` のように毎buildで変わる大きな値を
+    そのまま診断へ載せると読めなくなる。
+    """
+    old = snapshot.get("template") or {}
+    new = clone_template(natives)
+    changed = [
+        field
+        for field in set(old) & set(new)
+        if json.dumps(old[field], sort_keys=True) != json.dumps(new[field], sort_keys=True)
+    ]
+    return {
+        "added": sorted(set(new) - set(old)),
+        "removed": sorted(set(old) - set(new)),
+        "changed": sorted(changed),
+    }
 
 
 def generate(
@@ -278,16 +353,32 @@ def generate(
     output: Path,
     price_state: Path | None = None,
     model_ids: Iterable[str] | None = None,
+    snapshot: Path | None = None,
+    build_id: tuple[str, str] | None = None,
 ) -> Path:
     """取得 → 価格解決 → 組み立て → 契約検証 → 原子的置換。
 
     価格取得が失敗してもregistryのfallbackへ倒れるので、ここは止まらない。
+
+    `snapshot` と `build_id` を渡すと、置換が成功した後にcloneテンプレートを残す。
+    次のapp更新でテンプレートの差分を取るためのもので、catalogの生成自体には要らない。
+    書けなくても起動を止めない。
     """
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     all_models = registry["models"]
     selected = tuple(model_ids) if model_ids is not None else tuple(all_models)
     registry_models = {model: all_models[model] for model in selected}
     prices = pricing.resolve(registry, price_state)
-    document = build(bundled_models(codex, codex_home), registry_models, prices, registry)
+    natives = bundled_models(codex, codex_home)
+    document = build(natives, registry_models, prices, registry)
     validate(document, registry_models, all_models)
-    return write(document, output)
+    written = write(document, output)
+    if snapshot is not None and build_id is not None:
+        version, build_number = build_id
+        try:
+            snapshot_template(natives, snapshot, version=version, build=build_number)
+        except OSError:
+            # catalogは既に置換済み。診断用のsnapshotが書けなかっただけで
+            # 例外を上げると、supervisorがbuildを記録できず毎回組み直しになる。
+            pass
+    return written
