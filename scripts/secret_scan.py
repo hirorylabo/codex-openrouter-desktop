@@ -20,7 +20,10 @@ PATTERNS = {
 }
 FORBIDDEN_NAMES = {"auth.json", ".env", "Cookies", "Login Data"}
 FORBIDDEN_SUFFIXES = {".asar", ".db", ".sqlite", ".sqlite3"}
-SKIP_PARTS = {".git", "node_modules", "__pycache__", "dist"}
+# `.ruff_cache` はlint gateを回すたびに出来て、中に開発者のhome pathを持つ。
+# 追跡外なので配布物へは入らないが、`--tree` はgitではなくfilesystemを歩くので
+# ここで除外しないとローカル実行が必ず落ちる。
+SKIP_PARTS = {".git", ".ruff_cache", "node_modules", "__pycache__", "dist"}
 OS_JUNK_NAMES = {".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", "Thumbs.db", "desktop.ini"}
 
 
