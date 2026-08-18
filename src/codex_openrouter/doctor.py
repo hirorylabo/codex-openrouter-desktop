@@ -37,6 +37,7 @@ KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_\-]{8,}")
 class Doctor:
     def __init__(self) -> None:
         self.failures: list[str] = []
+        self.warnings: list[str] = []
 
     def ok(self, message: str) -> None:
         print(f"OK: {message}")
@@ -47,6 +48,7 @@ class Doctor:
 
     def warn(self, message: str) -> None:
         print(f"WARN: {message}")
+        self.warnings.append(message)
 
     def expect(self, condition: bool, ok_message: str, fail_message: str) -> bool:
         if condition:
@@ -304,6 +306,31 @@ def check_catalog(
     doctor.ok(f"compositeカタログは契約を満たします（picker表示 {len(listed)}件）")
 
 
+def check_catalog_template(doctor: Doctor, paths: UserPaths) -> None:
+    """導入済みbuildのcloneテンプレートに未知フィールドが増えていないか。
+
+    cloneは中和対象に挙げたフィールドだけを潰し、残りはそのままOpenRouter entryへ
+    引き継ぐ。純正appが能力フィールドを増やすとOpenRouterモデルが黙ってそれを
+    主張することになるので、更新を検知できるようにする。
+
+    未知フィールドが即座に有害とは限らないのでwarnに留める。継がせるか中和するかは
+    `catalog.NATIVE_ONLY_FIELDS` を見て人間が決める。
+    """
+    try:
+        natives = catalog_module.bundled_models(paths.stock_codex, paths.shared_home)
+        unknown = catalog_module.unknown_template_fields(natives)
+    except (catalog_module.CatalogError, OSError) as exc:
+        doctor.warn(f"cloneテンプレートを検査できません: {exc}")
+        return
+    if unknown:
+        doctor.warn(
+            "cloneテンプレートに未知フィールドがあります"
+            f"（OpenRouter entryが継いでいます）: {unknown}"
+        )
+        return
+    doctor.ok("cloneテンプレートは既知のフィールドだけで構成されています")
+
+
 def check_guard(doctor: Doctor, paths: UserPaths) -> None:
     state = State.load(paths.supervisor_state)
     if not state.active:
@@ -478,6 +505,7 @@ def run(
     check_manifest(doctor, paths, profile)
     check_config(doctor, paths, registry_models, set(registry))
     check_catalog(doctor, paths, registry_models, set(registry))
+    check_catalog_template(doctor, paths)
     if runtime:
         check_guard(doctor, paths)
     if secret_scan:

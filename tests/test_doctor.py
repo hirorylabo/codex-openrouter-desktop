@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -96,6 +97,38 @@ class CatalogCheckTests(DoctorTestCase):
         self.paths.composite_catalog.write_text('{"models": []}', encoding="utf-8")
         doctor_module.check_catalog(self.doctor, self.paths, REGISTRY, set(REGISTRY))
         self.assertTrue(self.doctor.failures)
+
+
+class TemplateCheckTests(DoctorTestCase):
+    """cloneテンプレートのdrift検知。純正appの更新でここが鳴る。"""
+
+    TEMPLATE = {"slug": "gpt-x", "display_name": "X", "visibility": "list"}
+
+    def _run_with(self, natives):
+        with mock.patch.object(
+            doctor_module.catalog_module, "bundled_models", return_value=natives
+        ):
+            doctor_module.check_catalog_template(self.doctor, self.paths)
+
+    def test_known_template_passes(self):
+        self._run_with([self.TEMPLATE])
+        self.assertEqual(self.doctor.failures, [])
+        self.assertEqual(self.doctor.warnings, [])
+
+    def test_new_field_is_a_warning_not_a_failure(self):
+        # 未知フィールドは即座に有害とは限らない。継がせるか中和するかは人間が決める。
+        self._run_with([self.TEMPLATE | {"brand_new_capability": True}])
+        self.assertEqual(self.doctor.failures, [])
+        self.assertTrue(
+            any("brand_new_capability" in w for w in self.doctor.warnings),
+            self.doctor.warnings,
+        )
+
+    def test_unreadable_stock_build_is_a_warning_not_a_failure(self):
+        # 純正app不在は check_stock の担当。ここで二重に落とさない。
+        doctor_module.check_catalog_template(self.doctor, self.paths)
+        self.assertEqual(self.doctor.failures, [])
+        self.assertTrue(self.doctor.warnings)
 
 
 class ManifestCheckTests(DoctorTestCase):

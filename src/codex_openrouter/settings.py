@@ -111,14 +111,6 @@ def materialize_registry(
     } | {"models": models}
 
 
-def _stale_catalogs(paths: UserPaths) -> list[Path]:
-    candidates = (
-        paths.composite_catalog,
-        catalog.previous_path(paths.composite_catalog),
-    )
-    return [path for path in candidates if path.is_file() and not path.is_symlink()]
-
-
 def openrouter_is_running(paths: UserPaths) -> bool:
     """OpenRouterモードが本当に動いているか。
 
@@ -208,7 +200,7 @@ def verify_promotion(
         raise SettingsError("既定モデルの適用待ちがarmされていません")
     if _load_manifest(paths).get("profile_digest") != profile.digest:
         raise SettingsError("promotion後のinstall-manifestがprofileと一致しません")
-    stale = _stale_catalogs(paths)
+    stale = catalog.stale_paths(paths.composite_catalog)
     if stale:
         raise SettingsError(f"旧catalogが残っています: {[str(path) for path in stale]}")
 
@@ -306,7 +298,9 @@ def _apply_locked(
         ]
         if registry_changed:
             replacements.append((stage / "registry.json", paths.installed_registry))
-        replacements.extend((None, stale) for stale in _stale_catalogs(paths))
+        replacements.extend(
+            (None, stale) for stale in catalog.stale_paths(paths.composite_catalog)
+        )
 
         atomic_promote(
             replacements,

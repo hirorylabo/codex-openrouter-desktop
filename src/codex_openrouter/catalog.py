@@ -21,7 +21,17 @@ OR_PREFIX = "[OR] "
 
 # nativeだけが持つ能力フィールド。cloneが継ぐとOpenRouterモデルが
 # native由来の機能を主張することになるので中和する。
-NATIVE_ONLY_FIELDS = ("multi_agent_version",)
+#
+# 中和値はnative側の型を保つこと。codexのcatalog deserializerはフィールドごとに
+# 型を要求し、boolフィールドをnullにすると `invalid type: null, expected a boolean`
+# でcatalog全体を拒否する（build 6662 / codex-cli 0.148.0-alpha.9で実測）。
+# 1件でも型を外すとpickerからOpenRouterモデルが丸ごと消えるため、
+# ここは「フィールド → 中和値」の対応で持つ。
+NATIVE_ONLY_FIELDS: dict[str, Any] = {
+    "multi_agent_version": None,
+    # Apps(Connectors)はChatGPTアカウント側の機能。build 6662で新設された。
+    "include_apps_usage_instructions": False,
+}
 
 # cloneが継ぐと誤解を招く提示用フィールド。
 RESET_FIELDS: dict[str, Any] = {
@@ -30,6 +40,50 @@ RESET_FIELDS: dict[str, Any] = {
     "additional_speed_tiers": [],
     "service_tiers": [],
 }
+
+# build 6662のcloneテンプレートが持つフィールド。純正appの更新でここに無い
+# フィールドが現れたら、cloneがそれを黙って継いでいる合図になる。
+# 「取り得る全フィールド」ではなく「いまテンプレートが実際に持つもの」を数える。
+KNOWN_TEMPLATE_FIELDS = frozenset(
+    {
+        "additional_speed_tiers",
+        "apply_patch_tool_type",
+        "availability_nux",
+        "base_instructions",
+        "comp_hash",
+        "context_window",
+        "default_reasoning_level",
+        "default_reasoning_summary",
+        "default_verbosity",
+        "description",
+        "display_name",
+        "effective_context_window_percent",
+        "experimental_supported_tools",
+        "include_apps_usage_instructions",
+        "include_plugin_usage_instructions",
+        "include_skills_usage_instructions",
+        "input_modalities",
+        "max_context_window",
+        "model_messages",
+        "multi_agent_version",
+        "priority",
+        "service_tiers",
+        "shell_type",
+        "slug",
+        "support_verbosity",
+        "supported_in_api",
+        "supported_reasoning_levels",
+        "supports_image_detail_original",
+        "supports_parallel_tool_calls",
+        "supports_search_tool",
+        "tool_mode",
+        "truncation_policy",
+        "upgrade",
+        "use_responses_lite",
+        "visibility",
+        "web_search_tool_type",
+    }
+)
 
 
 class CatalogError(RuntimeError):
@@ -63,6 +117,18 @@ def clone_template(natives: list[dict]) -> dict:
         if model.get("visibility") == "list":
             return model
     raise CatalogError("visibility=listのnative entryがありません")
+
+
+def unknown_template_fields(natives: list[dict]) -> list[str]:
+    """cloneテンプレートに現れた未知フィールドを返す。
+
+    cloneは`NATIVE_ONLY_FIELDS`と`RESET_FIELDS`に挙げたものだけを中和し、
+    残りはそのままOpenRouter entryへ引き継ぐ。純正appが能力フィールドを増やすと
+    OpenRouterモデルがそれを黙って主張することになるので、ここで検出だけする。
+
+    継がせるか中和するかは人間が決める。判定はしない。
+    """
+    return sorted(set(clone_template(natives)) - KNOWN_TEMPLATE_FIELDS)
 
 
 def build(
@@ -109,12 +175,10 @@ def build(
             entry["input_modalities"] = spec.get("codex_modalities") or ["text"]
         entry["supports_parallel_tool_calls"] = bool(spec.get("supports_parallel_tool_calls"))
 
-        for field, value in RESET_FIELDS.items():
-            if field in entry:
-                entry[field] = json.loads(json.dumps(value))
-        for field in NATIVE_ONLY_FIELDS:
-            if field in entry:
-                entry[field] = None
+        for source in (RESET_FIELDS, NATIVE_ONLY_FIELDS):
+            for field, value in source.items():
+                if field in entry:
+                    entry[field] = json.loads(json.dumps(value))
 
         entries.append(entry)
 
@@ -161,6 +225,13 @@ def validate(
             )
         if entry.get("visibility") != "list":
             raise CatalogError(f"{slug} がpickerに出ません: visibility={entry.get('visibility')}")
+        for field, neutral in NATIVE_ONLY_FIELDS.items():
+            # JSON表現で比べる。`0 == False` を同一視すると、boolを要求する
+            # フィールドの中和漏れを見逃す。
+            if field in entry and json.dumps(entry[field]) != json.dumps(neutral):
+                raise CatalogError(
+                    f"{slug} の {field} が中和されていません: {entry[field]!r} != {neutral!r}"
+                )
 
 
 def previous_path(path: Path) -> Path:
@@ -170,6 +241,21 @@ def previous_path(path: Path) -> Path:
     profile外モデルを含む世代が同じディレクトリに並ぶ。
     """
     return path.with_suffix(path.suffix + ".previous")
+
+
+def stale_paths(path: Path) -> list[Path]:
+    """再生成させるために消すべきcatalogファイル。
+
+    profile変更のほか、cloneの中和規則が変わったときにも使う。純正appのbuildが
+    同じだと `refresh_catalog_if_needed` は素通りするので、消しておかないと
+    古い規則で組んだcatalogがそのまま使われ続ける。
+    """
+    candidates = (path, previous_path(path))
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.is_file() and not candidate.is_symlink()
+    ]
 
 
 def write(document: dict, path: Path) -> Path:
