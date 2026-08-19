@@ -12,7 +12,7 @@ from codex_openrouter.lifecycle import LifecycleLock
 from codex_openrouter.processes import matching_processes
 from codex_openrouter.promotion import PromotionError, atomic_promote, rollback_replacements
 from scripts import secret_scan
-from scripts.build_release import copy_allowlist, tracked_paths, validate_release_version
+from scripts.build_release import FILES, copy_allowlist, tracked_paths, validate_release_version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,9 @@ class VersionAndAdapterTests(unittest.TestCase):
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_upstream_provenance_is_a_required_release_file(self) -> None:
+        self.assertIn("UPSTREAMS.md", FILES)
+
     def test_allowlist_ships_only_tracked_files_and_no_empty_directories(self) -> None:
         """成果物の内容をrepositoryの内容に一致させる。
 
@@ -213,6 +216,98 @@ class RuntimeDigestTests(unittest.TestCase):
                 source / "src/codex_openrouter/main.py"
             )
             self.assertNotEqual(after, upgrade_module.runtime_digest(source))
+
+
+class RegistryMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.source = self.root / "source.json"
+        self.installed = self.root / "installed.json"
+        self.source.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "catalog_refresh": {"models_url": "https://example.invalid/models"},
+                    "models": {
+                        "vendor/bundled": {"display_name": "Current bundled"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_removes_retired_provider_entries_and_keeps_openrouter_additions(self) -> None:
+        self.installed.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "retired_catalog_refresh": {"models_url": "https://retired.invalid"},
+                    "models": {
+                        "vendor/bundled": {"display_name": "Stale bundled"},
+                        "vendor/added": {
+                            "display_name": "Added",
+                            "router": "openrouter",
+                            "upstream_id": "vendor/added",
+                            "data_retention": "zdr",
+                        },
+                        "internal/retired": {
+                            "display_name": "Retired",
+                            "router": "retired-provider",
+                            "upstream_id": "vendor/retired",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        migrated = upgrade_module.migrated_registry(self.source, self.installed)
+
+        self.assertIsNotNone(migrated)
+        assert migrated is not None
+        self.assertNotIn("retired_catalog_refresh", migrated)
+        self.assertEqual("Current bundled", migrated["models"]["vendor/bundled"]["display_name"])
+        self.assertEqual("Added", migrated["models"]["vendor/added"]["display_name"])
+        self.assertNotIn("router", migrated["models"]["vendor/added"])
+        self.assertNotIn("upstream_id", migrated["models"]["vendor/added"])
+        self.assertNotIn("data_retention", migrated["models"]["vendor/added"])
+        self.assertTrue(migrated["models"]["vendor/added"]["zdr_supported"])
+        self.assertNotIn("internal/retired", migrated["models"])
+
+    def test_returns_none_when_the_source_registry_is_sufficient(self) -> None:
+        self.installed.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "models": {
+                        "vendor/bundled": {"display_name": "Stale bundled"},
+                        "anything": {"router": "retired-provider"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(upgrade_module.migrated_registry(self.source, self.installed))
+
+    def test_rejects_an_openrouter_entry_that_would_change_upstream_id(self) -> None:
+        self.installed.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "models": {
+                        "vendor/alias": {
+                            "router": "openrouter",
+                            "upstream_id": "vendor/different",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(upgrade_module.UpgradeError):
+            upgrade_module.migrated_registry(self.source, self.installed)
 
 
 class AutoUpgradeTests(unittest.TestCase):
