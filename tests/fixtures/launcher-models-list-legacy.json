@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "display_name": "DeepSeek V4 Flash 0731",
+      "description": "agentic coding",
+      "created": 1787140000,
+      "context_window": 1048576,
+      "efforts": ["low", "high", "max"],
+      "default_effort": "high",
+      "zdr_supported": true,
+      "trains_on_data": false,
+      "free": false,
+      "headline": {"input": "0.08", "output": "0.18", "cache_read": "0.016"},
+      "usage_tokens": null
+    }
+  ],
+  "usage_available": false
+}

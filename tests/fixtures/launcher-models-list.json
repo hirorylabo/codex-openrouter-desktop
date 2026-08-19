@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "display_name": "DeepSeek V4 Flash 0731",
+      "description": "agentic coding",
+      "created": 1787140000,
+      "context_window": 1048576,
+      "efforts": ["low", "high", "max"],
+      "default_effort": "high",
+      "zdr_supported": true,
+      "trains_on_data": false,
+      "free": false,
+      "headline": {"input": "0.08", "output": "0.18", "cache_read": "0.016"},
+      "usage_tokens": {"7d": "123456789"},
+      "tool_support": "verified",
+      "tool_support_reason": "Tool Bridge経由でstructured functionとfreeform toolを実測済み",
+      "tool_verified_at": 1787140000.0,
+      "tool_provider": "DeepInfra",
+      "tool_provider_attempt": 2,
+      "tool_contract_version": 2
+    },
+    {
+      "id": "vendor/chat-only",
+      "display_name": "Chat Only",
+      "description": "toolsなし",
+      "created": null,
+      "context_window": 128000,
+      "efforts": [],
+      "default_effort": null,
+      "zdr_supported": false,
+      "trains_on_data": null,
+      "free": false,
+      "headline": {"input": "1", "output": "2", "cache_read": "0"},
+      "usage_tokens": null,
+      "tool_support": "unsupported",
+      "tool_support_reason": "OpenRouter metadataがtools対応を公称していません",
+      "tool_verified_at": null,
+      "tool_provider": null,
+      "tool_provider_attempt": null,
+      "tool_contract_version": null
+    }
+  ],
+  "usage_available": true
+}

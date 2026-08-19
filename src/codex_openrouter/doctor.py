@@ -5,8 +5,8 @@ v0.1.xのdoctorはASAR hash・patch marker・clone appの署名・adapter.json�
 代わりに「configのmarker blockが正しいか」「catalogが契約を満たすか」
 「guardが番をしているか」を見る。
 
-**hash固定はしない。** Codexが週2回更新される前提なので、特定buildへ固定した
-時点で更新のたびに壊れる。
+catalogはbuild hashで固定しない。一方、tool wireは壊れたcallを実行しないため、
+実機canary済みの最新版と直前buildだけを明示的に許可する。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 
 from . import catalog as catalog_module
-from . import configblock
+from . import configblock, toolbridge, toolcompat
 from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .profile import active_registry, installed_profile
@@ -396,6 +396,20 @@ def check_guard(doctor: Doctor, paths: UserPaths) -> None:
     )
 
 
+def check_tool_wire_build(doctor: Doctor, paths: UserPaths, registry_path: Path) -> None:
+    try:
+        _version, build = stock_build_id(paths.stock_app)
+        toolbridge.assert_supported_build(
+            registry_path.parent / "tool-wire-builds.json", build
+        )
+    except (AppError, toolbridge.ToolBridgeError) as exc:
+        doctor.fail(f"OpenRouter tool wireは互換確認待ちです: {exc}")
+        return
+    doctor.ok(
+        f"ChatGPT build {build} はtool contract {toolbridge.TOOL_CONTRACT_VERSION}で確認済みです"
+    )
+
+
 def check_secret_scan(doctor: Doctor, paths: UserPaths) -> None:
     leaked: list[str] = []
     for path in (paths.shared_config, paths.guard_log, paths.composite_catalog):
@@ -502,6 +516,30 @@ def check_network(doctor: Doctor, paths: UserPaths, registry_models: dict) -> No
             f"{model} の実providerがZDR集合外です: {provider_name}",
         )
 
+    try:
+        _version, build = stock_build_id(paths.stock_app)
+        results = toolcompat.verify_models(
+            sorted(expected),
+            registry_models,
+            key=key,
+            build=build,
+            cache_path=paths.tool_compatibility,
+            force=True,
+        )
+    except toolcompat.ToolCompatibilityError as exc:
+        doctor.fail(f"Codex tool canaryを判定できません: {exc}")
+        return
+    for result in results:
+        status = result["tool_support"]
+        message = (
+            f"{result['id']} Codex tool={status}: "
+            f"{result['tool_support_reason']}"
+        )
+        if status == "verified":
+            doctor.ok(message)
+        else:
+            doctor.warn(message)
+
 
 def run(
     paths: UserPaths,
@@ -535,6 +573,7 @@ def run(
     check_config(doctor, paths, registry_models, set(registry))
     check_catalog(doctor, paths, registry_models, set(registry))
     check_catalog_template(doctor, paths)
+    check_tool_wire_build(doctor, paths, registry_path)
     if runtime:
         check_guard(doctor, paths)
     if secret_scan:

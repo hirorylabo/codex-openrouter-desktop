@@ -22,7 +22,14 @@ import signal
 import subprocess
 import threading
 
-from . import catalog, configblock, guard as guard_module, watcher as watcher_module
+from . import (
+    catalog,
+    configblock,
+    guard as guard_module,
+    toolbridge,
+    toolcompat,
+    watcher as watcher_module,
+)
 from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
@@ -32,7 +39,7 @@ from .profile import ResolvedProfile, active_registry, installed_profile
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 
 class SupervisorError(RuntimeError):
@@ -56,6 +63,7 @@ class State:
     # 現在のcatalogがどのprofileから作られたか。build更新だけでなくprofile変更でも
     # 組み直すために持つ。
     catalog_profile_digest: str | None = None
+    catalog_tool_digest: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "State":
@@ -115,6 +123,7 @@ class Supervisor:
         workspace: Path | None = None,
     ):
         self.paths = paths
+        self.tool_wire_builds = registry_path.parent / "tool-wire-builds.json"
         # 正本は導入済みregistryがあればそちら。同梱registryのまま読むと、
         # 設定画面で足したmodelがcatalog生成でKeyErrorになり、shutdown時の
         # native復帰でも「OpenRouterのmodelだと気づけない」状態になる。
@@ -210,8 +219,15 @@ class Supervisor:
         `upgrade --profile` のようにcatalogを消さない経路でも自己回復する。
         """
         version, build = stock_build_id(self.paths.stock_app)
+        tool_digest = toolcompat.compatibility_digest(
+            self.profile.registry,
+            self.paths.tool_compatibility,
+            build,
+        )
         unchanged = (version, build) == (self.state.version, self.state.build) and (
             self.state.catalog_profile_digest == self.profile.digest
+        ) and (
+            self.state.catalog_tool_digest == tool_digest
         )
         if unchanged and self.paths.composite_catalog.is_file() and not force:
             return False
@@ -223,14 +239,23 @@ class Supervisor:
             model_ids=self.profile.models,
             snapshot=self.paths.clone_template_snapshot,
             build_id=(version, build),
+            tool_compatibility=self.paths.tool_compatibility,
         )
         self.state.version, self.state.build = version, build
         self.state.catalog_profile_digest = self.profile.digest
+        self.state.catalog_tool_digest = tool_digest
         self.state.save(self.state_path)
         return True
 
     # [4][6] guard ----------------------------------------------------------
     def start_guard(self) -> int:
+        _version, build = stock_build_id(self.paths.stock_app)
+        try:
+            toolbridge.assert_supported_build(
+                self.tool_wire_builds, build
+            )
+        except toolbridge.ToolBridgeError as exc:
+            raise SupervisorError(str(exc)) from exc
         credential = CredentialStore(self.paths.credential_helper)
         instance = guard_module.Guard(
             allowed_models=self.profile.models,

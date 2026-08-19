@@ -23,8 +23,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from . import catalog, modelcatalog
-from .app import UserPaths, installed_workspace, write_json
+from . import catalog, modelcatalog, toolcompat
+from .app import AppError, UserPaths, installed_workspace, stock_build_id, write_json
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
 from .openrouter import validate_key_and_profile
@@ -47,6 +47,14 @@ DOCUMENT_SCHEMA_VERSION = 1
 
 class SettingsError(RuntimeError):
     pass
+
+
+def _chatgpt_build(paths: UserPaths) -> str:
+    """実機buildを返す。隔離unit testだけは保存済みstateへ倒す。"""
+    try:
+        return stock_build_id(paths.stock_app)[1]
+    except AppError:
+        return State.load(paths.supervisor_state).build or "unknown"
 
 
 def _read_registry(registry_path: Path) -> dict[str, Any]:
@@ -135,6 +143,7 @@ def show_document(paths: UserPaths, registry_path: Path) -> dict[str, Any]:
     registry = _registry_models(active_registry(registry_path, paths))
     _selected, profile = installed_profile(registry_path, paths)
     active = openrouter_is_running(paths)
+    build = _chatgpt_build(paths)
     return {
         "schema_version": DOCUMENT_SCHEMA_VERSION,
         "profile": {**profile.as_json(), "digest": profile.digest},
@@ -147,6 +156,9 @@ def show_document(paths: UserPaths, registry_path: Path) -> dict[str, Any]:
                 "default_effort": spec.get("default_effort"),
                 "context_window": spec.get("context_window"),
                 "zdr_supported": bool(spec.get("zdr_supported", True)),
+                **toolcompat.support_for(
+                    model, spec, paths.tool_compatibility, build
+                ),
             }
             for model, spec in registry.items()
         ],
@@ -264,6 +276,42 @@ def _apply_locked(
     key = CredentialStore(paths.credential_helper).get()
     validate_key_and_profile(key, set(profile.models))
 
+    added = sorted(set(profile.models) - set(current.models))
+    build = _chatgpt_build(paths)
+    needs_canary = [
+        model
+        for model in added
+        if toolcompat.support_for(
+            model, registry_document["models"][model], paths.tool_compatibility, build
+        )["tool_support"]
+        in {"declared", "unknown"}
+    ]
+    if needs_canary:
+        toolcompat.verify_models(
+            needs_canary,
+            registry_document["models"],
+            key=key,
+            build=build,
+            cache_path=paths.tool_compatibility,
+        )
+
+    acknowledged = set(payload.get("tool_risk_acknowledged") or [])
+    if not acknowledged <= set(profile.models):
+        raise SettingsError("tool_risk_acknowledgedに選択外のmodelがあります")
+    risky = {
+        model
+        for model in added
+        if toolcompat.support_for(
+            model, registry_document["models"][model], paths.tool_compatibility, build
+        )["tool_support"]
+        in {"partial", "unsupported"}
+    }
+    missing_ack = sorted(risky - acknowledged)
+    if missing_ack:
+        raise SettingsError(
+            "Codex tool非互換リスクの明示承認が必要です: " + ", ".join(missing_ack)
+        )
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     # upgrade-backups とは分ける。`codex-openrouter rollback` は「runtimeをupgrade前へ
     # 戻す」ためのもので、モデル選択の取り消しではない。
@@ -283,6 +331,7 @@ def _apply_locked(
             profile_digest=profile.digest,
             pending_default_model=True,
             catalog_profile_digest=None,
+            catalog_tool_digest=None,
         ).save(stage / "supervisor.json")
         write_json(stage / "install-manifest.json", {**manifest, "profile_digest": profile.digest})
 

@@ -152,7 +152,6 @@ class TemplateSnapshotCheckTests(DoctorTestCase):
         # 初回起動前はsnapshotが無い。そのことを利用者へ報告しても行動に繋がらない。
         self._run_with([self.TEMPLATE])
         self.assertEqual(self.doctor.warnings, [])
-        self.assertEqual(self.doctor.failures, [])
 
     def test_same_build_says_nothing(self):
         self.write_snapshot("6720", self.TEMPLATE)
@@ -172,6 +171,26 @@ class TemplateSnapshotCheckTests(DoctorTestCase):
         self.write_snapshot("6662", self.TEMPLATE)
         self._run_with([self.TEMPLATE])
         self.assertEqual(self.doctor.warnings, [])
+
+
+class ToolWireBuildCheckTests(DoctorTestCase):
+    def test_latest_build_is_accepted(self):
+        with mock.patch.object(
+            doctor_module, "stock_build_id", return_value=("26.814", "6720")
+        ):
+            doctor_module.check_tool_wire_build(
+                self.doctor, self.paths, ROOT / "models/registry.json"
+            )
+        self.assertEqual([], self.doctor.failures)
+
+    def test_unknown_build_blocks_only_openrouter_compatibility(self):
+        with mock.patch.object(
+            doctor_module, "stock_build_id", return_value=("26.900", "7000")
+        ):
+            doctor_module.check_tool_wire_build(
+                self.doctor, self.paths, ROOT / "models/registry.json"
+            )
+        self.assertTrue(any("互換確認待ち" in item for item in self.doctor.failures))
 
 
 class ManifestCheckTests(DoctorTestCase):

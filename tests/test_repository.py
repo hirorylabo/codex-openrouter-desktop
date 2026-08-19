@@ -79,7 +79,11 @@ class RepositoryTests(unittest.TestCase):
         registry = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"))
         profile = json.loads((ROOT / "profiles/default.json").read_text(encoding="utf-8"))
         self.assertEqual(1, registry["schema_version"])
-        self.assertEqual(set(profile["models"]), set(registry["models"]))
+        self.assertTrue(set(profile["models"]) <= set(registry["models"]))
+        self.assertEqual(
+            ["deepseek/deepseek-v4-flash-0731"], profile["models"]
+        )
+        self.assertEqual("deepseek/deepseek-v4-flash-0731", profile["default_model"])
         self.assertTrue(
             registry["models"]["deepseek/deepseek-v4-flash-0731"][
                 "supports_parallel_tool_calls"
@@ -93,6 +97,26 @@ class RepositoryTests(unittest.TestCase):
             ["text", "image"],
             registry["models"]["moonshotai/kimi-k3"]["codex_modalities"],
         )
+
+    def test_orcarouter_is_absent_from_operational_sources(self) -> None:
+        targets = [
+            ROOT / "src",
+            ROOT / "portable",
+            ROOT / "models",
+            ROOT / "profiles",
+            ROOT / "README.md",
+            ROOT / "README.en.md",
+        ]
+        found: list[str] = []
+        for target in targets:
+            paths = [target] if target.is_file() else target.rglob("*")
+            for path in paths:
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                if "orcarouter" in text or "orca/" in text:
+                    found.append(str(path.relative_to(ROOT)))
+        self.assertEqual([], found)
 
     def test_network_request_pins_active_zdr_provider_tags(self) -> None:
         class Response:

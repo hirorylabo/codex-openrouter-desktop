@@ -31,6 +31,7 @@ from typing import Any
 import urllib.parse
 
 from . import pricing
+from . import toolcompat
 from .app import UserPaths, write_json
 
 CACHE_SCHEMA_VERSION = 1
@@ -214,14 +215,12 @@ def derive_row(
     usage: dict[str, str] | None,
     codex_modalities: list[str],
 ) -> dict[str, Any] | None:
-    """1件のライブmodelを候補行へ。Codexで使えないものはNoneで落とす。"""
+    """1件のライブmodelを候補行へ。tool非対応も状態付きで残す。"""
     identifier = model.get("id")
     if not isinstance(identifier, str) or identifier.startswith(("openrouter/", "~")):
         return None
-    parameters = model.get("supported_parameters") or []
-    if "tools" not in parameters:
-        # Codexはtool callingが前提。呼べないmodelを候補に出しても選べるだけ無駄。
-        return None
+    parameters = model.get("supported_parameters")
+    tool_support, tool_reason = toolcompat.metadata_support(parameters)
     architecture = model.get("architecture") or {}
     inputs = [m for m in (architecture.get("input_modalities") or []) if isinstance(m, str)]
     outputs = architecture.get("output_modalities") or []
@@ -247,7 +246,13 @@ def derive_row(
         "codex_modalities": [m for m in inputs if m in codex_modalities] or ["text"],
         "efforts": efforts,
         "default_effort": default_effort if default_effort in efforts else None,
-        "supports_parallel_tool_calls": "parallel_tool_calls" in parameters,
+        "supports_parallel_tool_calls": (
+            isinstance(parameters, list) and "parallel_tool_calls" in parameters
+        ),
+        "supported_parameters": parameters,
+        "tool_support": tool_support,
+        "tool_support_reason": tool_reason,
+        "tool_verified_at": None,
         "zdr_supported": bool(zdr_endpoints),
         "trains_on_data": trains,
         "free": headline["input"] == "0" and headline["output"] == "0",
@@ -288,6 +293,8 @@ def entry_for(row: dict, curated: dict | None = None) -> dict[str, Any]:
         "efforts": row["efforts"],
         "default_effort": row["default_effort"],
         "supports_parallel_tool_calls": row["supports_parallel_tool_calls"],
+        "tool_support": row["tool_support"],
+        "tool_support_reason": row["tool_support_reason"],
         "capability": (curated or {}).get("capability") or row["description"],
         "reasoning_note": (curated or {}).get("reasoning_note") or reasoning_note(row),
         "zdr_supported": row["zdr_supported"],
@@ -438,7 +445,19 @@ def read_cache(path: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(document, dict) or document.get("schema_version") != CACHE_SCHEMA_VERSION:
         return None
-    return document if isinstance(document.get("models"), list) else None
+    models = document.get("models")
+    if not isinstance(models, list):
+        return None
+    # multi-router開発版が同じschema_version=1で残したcacheを再利用しない。
+    # profile schemaは互換のため据え置くが、候補cacheへ旧第2router行を残すと
+    # 撤去後もUIへ出る。
+    if any(
+        isinstance(row, dict)
+        and "router" in row
+        for row in models
+    ):
+        return None
+    return document
 
 
 def load(

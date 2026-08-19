@@ -122,6 +122,50 @@ def runtime_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def migrated_registry(source: Path, installed: Path) -> dict | None:
+    """旧multi-provider registryをOpenRouter専用へ正規化する。
+
+    同梱entryは現行sourceを正本にし、設定画面で追加済みのOpenRouter entryだけを
+    後ろへ残す。旧provider固有entryは ``router`` 契約で判別し、内部IDの文字列から
+    推測しない。追加entryが無ければ導入済みregistry自体を外し、同梱registryへ戻す。
+    """
+    if not installed.is_file() or installed.is_symlink():
+        return None
+    try:
+        source_document = json.loads(source.read_text(encoding="utf-8"))
+        installed_document = json.loads(installed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise UpgradeError(f"model registryを移行できません: {exc}") from exc
+    source_models = source_document.get("models")
+    installed_models = installed_document.get("models")
+    if not isinstance(source_models, dict) or not isinstance(installed_models, dict):
+        raise UpgradeError("model registryを移行できません: modelsが不正です")
+
+    extras: dict[str, dict] = {}
+    for model, raw_spec in installed_models.items():
+        if model in source_models or not isinstance(raw_spec, dict):
+            continue
+        router = raw_spec.get("router", "openrouter")
+        if router != "openrouter":
+            continue
+        upstream_id = raw_spec.get("upstream_id", model)
+        if upstream_id != model:
+            raise UpgradeError(
+                f"OpenRouter registryのmodel IDとupstream IDが一致しません: {model}"
+            )
+        spec = dict(raw_spec)
+        if "zdr_supported" not in spec and "data_retention" in spec:
+            spec["zdr_supported"] = spec["data_retention"] == "zdr"
+        spec.pop("router", None)
+        spec.pop("upstream_id", None)
+        spec.pop("data_retention", None)
+        spec.pop("uncensored", None)
+        extras[model] = spec
+    if not extras:
+        return None
+    return {**source_document, "models": {**source_models, **extras}}
+
+
 def manifest_document(
     source_root: Path,
     paths: UserPaths,
@@ -275,6 +319,24 @@ def promote_runtime(
             directory.mkdir()
         copy_support(source_root, stage_support)
 
+        registry_document = migrated_registry(
+            source_root / "models/registry.json", paths.installed_registry
+        )
+        if registry_document is not None:
+            write_json(stage_state / "registry.json", registry_document)
+        available_models = (
+            registry_document
+            if registry_document is not None
+            else json.loads(
+                (source_root / "models/registry.json").read_text(encoding="utf-8")
+            )
+        )["models"]
+        if not set(profile.models) <= set(available_models):
+            raise UpgradeError(
+                "廃止したproviderのmodelがprofileに残っています。"
+                "OpenRouter modelだけへ変更してからupgradeしてください"
+            )
+
         credential = stage_bin / "codex-openrouter-credential"
         run(
             [
@@ -345,6 +407,12 @@ def promote_runtime(
                 (stage_state / "install-manifest.json", paths.install_manifest),
                 (stage_state / "profile.json", paths.installed_profile),
                 (stage_state / "supervisor.json", paths.supervisor_state),
+            )
+        )
+        replacements.append(
+            (
+                stage_state / "registry.json" if registry_document is not None else None,
+                paths.installed_registry,
             )
         )
         # 旧catalogを落として次回起動で組み直させる。cloneの中和規則が変わっても

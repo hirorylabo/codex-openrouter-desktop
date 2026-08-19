@@ -102,9 +102,11 @@ def resolve_profile(registry_path: Path, profile_path: Path) -> ResolvedProfile:
     )
 
 
-# 設定画面から変更できるのはこの3keyだけ。表示名・reasoning effort・並び順は
-# registryが持ち、入力経路を持たない。
-APPLY_KEYS = frozenset({"schema_version", "models", "default_model"})
+# tool非互換モデルのexact ID承認だけを追加で受け取る。表示名・reasoning effort・
+# 並び順はregistryが持ち、入力経路を持たない。
+APPLY_KEYS = frozenset(
+    {"schema_version", "models", "default_model", "tool_risk_acknowledged"}
+)
 
 
 def parse_apply_payload(raw: str) -> dict[str, Any]:
@@ -118,6 +120,13 @@ def parse_apply_payload(raw: str) -> dict[str, Any]:
     unexpected = sorted(set(document) - APPLY_KEYS)
     if unexpected:
         raise ProfileError(f"applyで変更できない項目です: {', '.join(unexpected)}")
+    acknowledged = document.get("tool_risk_acknowledged", [])
+    if (
+        not isinstance(acknowledged, list)
+        or not all(isinstance(model, str) and model for model in acknowledged)
+        or len(acknowledged) != len(set(acknowledged))
+    ):
+        raise ProfileError("tool_risk_acknowledgedは重複のないmodel ID配列で指定してください")
     return document
 
 
@@ -176,6 +185,19 @@ def active_registry(source_registry: Path, paths: "UserPaths") -> Path:
     """
     installed = paths.installed_registry
     if installed.is_file() and not installed.is_symlink():
+        try:
+            document = _load_json(installed)
+        except ProfileError:
+            return installed
+        models = document.get("models")
+        if isinstance(models, dict) and any(
+            isinstance(spec, dict)
+            and spec.get("router", "openrouter") != "openrouter"
+            for spec in models.values()
+        ):
+            # 旧multi-provider開発版のregistryをOpenRouter専用runtimeへ読ませない。
+            # upgradeが追加OpenRouter modelを保ったまま正規化するまで、同梱側へ倒す。
+            return source_registry
         return installed
     return source_registry
 

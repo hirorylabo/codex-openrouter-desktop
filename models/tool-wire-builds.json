@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "tool_contract_version": 2,
+  "builds": [
+    {
+      "build": "6720",
+      "chatgpt_version": "26.814.41407",
+      "fixture": "codex-tool-wire-6720"
+    },
+    {
+      "build": "6662",
+      "chatgpt_version": "26.811.35000",
+      "fixture": "codex-tool-wire-6662"
+    }
+  ]
+}

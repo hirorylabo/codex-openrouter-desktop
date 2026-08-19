@@ -27,12 +27,12 @@ class RecordingForwarder:
     """呼ばれたら記録する。拒否経路で呼ばれないことを証明するために使う。"""
 
     def __init__(self, status: int = 200, payload: bytes = b"data: ok\n\n"):
-        self.calls: list[tuple[bytes, str]] = []
+        self.calls: list[tuple[bytes, str, bool]] = []
         self.status = status
         self.payload = payload
 
-    def __call__(self, body: bytes, key: str):
-        self.calls.append((body, key))
+    def __call__(self, body: bytes, key: str, metadata_enabled: bool):
+        self.calls.append((body, key, metadata_enabled))
         return self.status, {"Content-Type": "text/event-stream"}, io.BytesIO(self.payload)
 
 
@@ -130,6 +130,48 @@ class AllowlistTests(GuardTestCase):
         self.assertEqual(self.forwarder.calls, [])
         self.assertEqual(self.log_records(), [])
 
+    def test_tool_request_is_bridged_and_enables_router_metadata(self):
+        self.forwarder.payload = b"".join(
+            [
+                b'data: {"type":"response.completed","response":{"output":[]},'
+                b'"openrouter_metadata":{"attempts":[{"provider_name":"Example",'
+                b'"status":200}],"endpoints":[{}]}}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        )
+        status, payload = self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "patch",
+                "tools": [{"type": "custom", "name": "apply_patch"}],
+            }
+        )
+        self.assertEqual(200, status)
+        forwarded, _key, metadata_enabled = self.forwarder.calls[0]
+        tool = json.loads(forwarded)["tools"][0]
+        self.assertEqual("function", tool["type"])
+        self.assertEqual(["patch"], tool["parameters"]["required"])
+        self.assertTrue(metadata_enabled)
+        self.assertNotIn(b"openrouter_metadata", payload)
+        record = self.log_records()[0]
+        self.assertEqual("Example", record["provider"])
+        self.assertEqual(1, record["provider_attempt"])
+
+    def test_invalid_tool_contract_is_denied_before_key_or_forwarder(self):
+        self.guard.key_provider = lambda: (_ for _ in ()).throw(
+            AssertionError("Keychain must not be read")
+        )
+        status, payload = self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "x",
+                "tools": [{"type": "web_search"}],
+            }
+        )
+        self.assertEqual(400, status)
+        self.assertIn(b"tool_bridge_error", payload)
+        self.assertEqual([], self.forwarder.calls)
+
 
 class LoggingTests(GuardTestCase):
     def test_denied_request_is_logged_without_body(self):
@@ -214,7 +256,7 @@ class FailureTests(GuardTestCase):
         self.assertEqual(self.forwarder.calls, [])
 
     def test_upstream_failure_is_reported_as_502(self):
-        def explode(body, key):
+        def explode(body, key, metadata_enabled):
             raise OSError("connection reset")
 
         self.guard.forwarder = explode
@@ -226,6 +268,23 @@ class FailureTests(GuardTestCase):
         status, payload = self.post({"model": "z-ai/glm-5.2", "input": "hi"})
         self.assertEqual(status, 429)
         self.assertIn(b"rate", payload)
+
+
+class UpstreamHeaderTests(unittest.TestCase):
+    def test_router_metadata_header_is_only_added_for_tool_requests(self):
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+        with mock.patch.object(
+            guard_module.urllib.request, "urlopen", return_value=Response()
+        ) as urlopen:
+            guard_module.forward_to_openrouter(b"{}", "test-key", True)
+            enabled = urlopen.call_args.args[0]
+            guard_module.forward_to_openrouter(b"{}", "test-key", False)
+            disabled = urlopen.call_args.args[0]
+        self.assertEqual("enabled", enabled.get_header("X-openrouter-metadata"))
+        self.assertIsNone(disabled.get_header("X-openrouter-metadata"))
 
 
 class HealthTests(GuardTestCase):

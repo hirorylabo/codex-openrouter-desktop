@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from codex_openrouter import configblock, supervisor as sup  # noqa: E402
+from codex_openrouter import configblock, supervisor as sup, toolcompat  # noqa: E402
 from codex_openrouter.app import UserPaths  # noqa: E402
 from codex_openrouter.lifecycle import LifecycleLock, LifecycleLockError  # noqa: E402
 from codex_openrouter.profile import ResolvedProfile  # noqa: E402
@@ -249,6 +250,37 @@ class UpdateFollowTests(SupervisorTestCase):
         self.assertEqual((model,), generate.call_args.kwargs["model_ids"])
         self.assertEqual(2, generate.call_count)
 
+    def test_catalog_is_regenerated_when_effective_tool_status_changes(self):
+        def fake_generate(_codex, _home, _registry, output, **_kwargs):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text('{"models": []}', encoding="utf-8")
+            return output
+
+        with (
+            mock.patch.object(sup, "stock_build_id", return_value=("26.2", "6720")),
+            mock.patch.object(sup.catalog, "generate", side_effect=fake_generate) as generate,
+        ):
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+            self.assertFalse(self.supervisor.refresh_catalog_if_needed())
+            model = self.supervisor.profile.models[0]
+            toolcompat._atomic_write(
+                self.paths.tool_compatibility,
+                {
+                    "schema_version": 1,
+                    "entries": {
+                        model: {
+                            "chatgpt_build": "6720",
+                            "tool_contract_version": toolcompat.TOOL_CONTRACT_VERSION,
+                            "status": "partial",
+                            "reason": "fixture",
+                            "verified_at": time.time(),
+                        }
+                    },
+                },
+            )
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+        self.assertEqual(2, generate.call_count)
+
     def test_state_survives_new_instance(self):
         with mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")), \
              mock.patch.object(sup.catalog, "generate", return_value=self.paths.composite_catalog):
@@ -333,6 +365,15 @@ class ProviderBlockTests(unittest.TestCase):
 
 
 class ProfileRuntimeTests(SupervisorTestCase):
+    def test_unknown_build_blocks_guard_before_keychain_access(self):
+        with (
+            mock.patch.object(sup, "stock_build_id", return_value=("26.9", "7000")),
+            mock.patch.object(sup, "CredentialStore") as credential_store,
+            self.assertRaisesRegex(sup.SupervisorError, "7000"),
+        ):
+            self.supervisor.start_guard()
+        credential_store.assert_not_called()
+
     def test_custom_profile_drives_guard_watcher_and_catalog(self):
         model = "minimax/minimax-m3"
         profile = ResolvedProfile(

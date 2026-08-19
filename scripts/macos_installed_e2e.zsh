@@ -116,6 +116,9 @@ for row in rows:
     # 学習ポリシーは「不明」を許すが、ZDRなら必ず学習しないと言えること。
     if row["zdr_supported"]:
         assert row["trains_on_data"] is False, row["id"]
+    assert row.get("tool_support") in {
+        "verified", "partial", "declared", "unknown", "unsupported"
+    }, row["id"]
 zdr = sum(1 for row in rows if row["zdr_supported"])
 usage = document["usage_available"]
 print(f"  候補 {len(rows)}件 / ZDR {zdr}件 / 利用量あり {usage}")
@@ -134,11 +137,13 @@ manual_checklist() {
   print -- "  4. 純正ChatGPT起動中にクリックすると切替確認が出る"
   print -- "  5. 設定画面のどこにもAPI keyが表示されない"
   print -- "  6. 終了後に codex-openrouter doctor が純正app無改変を報告する"
-  print -- "  7. 一覧が価格・公開日・7dトークン量つきで出て、並べ替えが効く"
+  print -- "  7. 一覧が価格・公開日・7dトークン量・Codex tool状態つきで出る"
   print -- "  8. 「ZDRのみ」が既定でONで、外すと候補が増える"
   print -- "  9. ZDRなしのモデルを選ぶと確認シートが出る（やめる=選択されない）"
   print -- " 10. 追加後、管理画面に「ZDRなしのモデルを N件使用中です」が橙色で出る"
   print -- " 11. 追加したモデルが純正pickerに出て、実際に応答する"
+  print -- " 12. 検証済みモデルではproviderと検証時刻が表示される"
+  print -- " 13. tool非対応は既定で隠れ、件数表示と明示承認で選択できる"
 }
 
 run_cycle() {

@@ -107,6 +107,11 @@ class UserPaths:
     def catalog_cache_state(self) -> Path:
         return self.state_dir / "model-catalog-state.json"
 
+    @property
+    def tool_compatibility(self) -> Path:
+        """Codex direct-tool canaryの結果。秘密値とprompt本文は含まない。"""
+        return self.state_dir / "tool-compatibility.json"
+
 
 def write_json(path: Path, document: dict) -> None:
     """runtime stateのJSONを0600で書く。中身は秘密値を含まない前提。"""

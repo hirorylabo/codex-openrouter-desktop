@@ -25,6 +25,7 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         var noTrainingOnly = false
         var freeOnly = false
         var reasoningOnly = false
+        var showUnsupported = false
         var search = ""
     }
 
@@ -53,16 +54,17 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsColumnSelection = false
         tableView.allowsMultipleSelection = false
-        tableView.rowHeight = 34
+        tableView.rowHeight = 42
         tableView.style = .inset
 
         addColumn("pick", title: "", width: 26)
-        addColumn("model", title: "モデル", width: 250, sortField: .model)
+        addColumn("model", title: "モデル", width: 225, sortField: .model)
         addColumn("input", title: "IN $/M", width: 74, sortField: .input)
         addColumn("output", title: "OUT $/M", width: 74, sortField: .output)
         addColumn("released", title: "公開日", width: 88, sortField: .released)
         addColumn("usage", title: "7dトークン", width: 88, sortField: .usage)
-        addColumn("badges", title: "", width: 130)
+        addColumn("tool", title: "Codex tool / provider", width: 128)
+        addColumn("badges", title: "", width: 100)
         tableView.sortDescriptors = [sortDescriptor(for: .released, ascending: false)]
 
         scrollView.documentView = tableView
@@ -114,6 +116,15 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         tableView.reloadData()
     }
 
+    func applyToolResults(_ results: [ProfileBridge.ToolResult]) {
+        let byId = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
+        entries = entries.map { entry in
+            guard let result = byId[entry.id] else { return entry }
+            return entry.replacingToolState(with: result)
+        }
+        refilter()
+    }
+
     func entry(id: String) -> ProfileBridge.CatalogEntry? {
         entries.first { $0.id == id }
     }
@@ -128,6 +139,7 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         if filters.noTrainingOnly && entry.trainsOnData != false { return false }
         if filters.freeOnly && !entry.free { return false }
         if filters.reasoningOnly && entry.efforts.isEmpty { return false }
+        if !filters.showUnsupported && entry.toolSupport == "unsupported" { return false }
         let needle = filters.search.trimmingCharacters(in: .whitespaces).lowercased()
         if !needle.isEmpty {
             return entry.id.lowercased().contains(needle)
@@ -206,6 +218,7 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
     }
 
     var visibleCount: Int { visible.count }
+    var unsupportedCount: Int { entries.filter { $0.toolSupport == "unsupported" }.count }
 
     // --- 描画 ----------------------------------------------------------------
 
@@ -269,6 +282,41 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         return field
     }
 
+    private func toolLabel(_ entry: ProfileBridge.CatalogEntry) -> NSTextField {
+        let labels = [
+            "verified": "検証済み",
+            "partial": "一部対応",
+            "declared": "公称",
+            "unknown": "不明",
+            "unsupported": "非対応",
+        ]
+        let status = entry.toolSupport ?? "unknown"
+        var lines = [labels[status] ?? "不明"]
+        if let provider = entry.toolProvider, !provider.isEmpty {
+            lines.append(provider)
+        }
+        let field = label(lines.joined(separator: "\n"), secondary: status == "declared")
+        field.maximumNumberOfLines = 2
+        var details = [entry.toolSupportReason ?? "互換性の根拠はありません。"]
+        if let provider = entry.toolProvider, !provider.isEmpty {
+            var providerLine = "検証provider: \(provider)"
+            if let attempt = entry.toolProviderAttempt {
+                providerLine += "（試行 \(attempt)）"
+            }
+            details.append(providerLine)
+        }
+        if let verifiedAt = entry.toolVerifiedAt {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
+            details.append("検証時刻: \(formatter.string(from: Date(timeIntervalSince1970: verifiedAt)))")
+        }
+        field.toolTip = details.joined(separator: "\n")
+        if status == "partial" || status == "unsupported" {
+            field.textColor = .systemOrange
+        }
+        return field
+    }
+
     func tableView(
         _ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int
     ) -> NSView? {
@@ -300,6 +348,8 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
             return label(released(entry), mono: true, secondary: true)
         case "usage":
             return label(usageText(entry), mono: true, secondary: true)
+        case "tool":
+            return toolLabel(entry)
         case "badges":
             return badges(entry)
         default:

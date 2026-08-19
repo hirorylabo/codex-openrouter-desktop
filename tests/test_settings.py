@@ -5,10 +5,11 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from codex_openrouter import cli, modelcatalog, settings
+from codex_openrouter import cli, modelcatalog, settings, toolcompat
 from codex_openrouter.openrouter import OpenRouterError
 from codex_openrouter.profile import ProfileError, resolve_profile
 from codex_openrouter.settings import SettingsError
@@ -72,6 +73,7 @@ class SettingsTestCase(unittest.TestCase):
             self.paths.install_manifest,
             self.paths.composite_catalog,
             catalog.previous_path(self.paths.composite_catalog),
+            self.paths.tool_compatibility,
         ]
 
     def snapshot(self) -> dict[str, bytes | None]:
@@ -80,7 +82,15 @@ class SettingsTestCase(unittest.TestCase):
             for path in self.tracked()
         }
 
-    def apply(self, payload: object, *, key: str | None = KEY, validate=None):
+    def apply(
+        self,
+        payload: object,
+        *,
+        key: str | None = KEY,
+        validate=None,
+        verify_error: Exception | None = None,
+        catalog_document: dict | None = None,
+    ):
         raw = payload if isinstance(payload, str) else json.dumps(payload)
         store = mock.Mock()
         if key is None:
@@ -95,6 +105,29 @@ class SettingsTestCase(unittest.TestCase):
                 side_effect=validate,
                 return_value={"limit": 10},
             ) as validated,
+            mock.patch.object(
+                toolcompat,
+                "verify_models",
+                side_effect=verify_error,
+                return_value=[
+                    {
+                        "id": "fixture",
+                        "tool_support": "verified",
+                        "tool_support_reason": "fixture",
+                        "tool_verified_at": 1.0,
+                    }
+                ],
+            ),
+            mock.patch.object(
+                modelcatalog,
+                "load",
+                return_value=catalog_document,
+                side_effect=(
+                    SettingsError("unit testでは実networkへ接続しません")
+                    if catalog_document is None
+                    else None
+                ),
+            ),
         ):
             result = settings.apply_payload(self.paths, REGISTRY, raw)
         self.validated = validated
@@ -186,14 +219,14 @@ class RejectionTests(SettingsTestCase):
     def test_keychain_failure_changes_nothing(self) -> None:
         before = self.snapshot()
         with self.assertRaises(RuntimeError):
-            self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]), key=None)
+            self.apply(self.selection([ALL_MODELS[1]], ALL_MODELS[1]), key=None)
         self.assertEqual(before, self.snapshot())
 
     def test_guardrail_mismatch_changes_nothing(self) -> None:
         before = self.snapshot()
         with self.assertRaises(OpenRouterError):
             self.apply(
-                self.selection([ALL_MODELS[0]], ALL_MODELS[0]),
+                self.selection([ALL_MODELS[1]], ALL_MODELS[1]),
                 validate=OpenRouterError("missing=..., extra=..."),
             )
         self.assertEqual(before, self.snapshot())
@@ -202,7 +235,7 @@ class RejectionTests(SettingsTestCase):
         before = self.snapshot()
         with self.assertRaises(OpenRouterError):
             self.apply(
-                self.selection([ALL_MODELS[0]], ALL_MODELS[0]),
+                self.selection([ALL_MODELS[1]], ALL_MODELS[1]),
                 validate=OpenRouterError("OpenRouter APIへ接続できません: URLError"),
             )
         self.assertEqual(before, self.snapshot())
@@ -211,7 +244,7 @@ class RejectionTests(SettingsTestCase):
         self.paths.install_manifest.unlink()
         before = self.snapshot()
         with self.assertRaises(settings.SettingsError):
-            self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+            self.apply(self.selection([ALL_MODELS[1]], ALL_MODELS[1]))
         self.assertEqual(before, self.snapshot())
 
     def test_promotion_verification_failure_restores_every_target(self) -> None:
@@ -226,7 +259,7 @@ class RejectionTests(SettingsTestCase):
             ),
             self.assertRaises(PromotionError),
         ):
-            self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+            self.apply(self.selection([ALL_MODELS[1]], ALL_MODELS[1]))
         self.assertEqual(before, self.snapshot())
 
 
@@ -373,6 +406,16 @@ class CommandTests(SettingsTestCase):
             mock.patch.object(cli, "root", return_value=ROOT),
             mock.patch.object(settings, "CredentialStore", return_value=store),
             mock.patch.object(settings, "validate_key_and_profile", return_value={"limit": 10}),
+            mock.patch.object(
+                toolcompat,
+                "verify_models",
+                return_value=[{
+                    "id": ALL_MODELS[1],
+                    "tool_support": "verified",
+                    "tool_support_reason": "fixture",
+                    "tool_verified_at": 1.0,
+                }],
+            ),
             mock.patch("sys.stdin", io.StringIO(stdin)),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
@@ -393,7 +436,7 @@ class CommandTests(SettingsTestCase):
                 self.run_cli(argv)
 
     def test_apply_reads_stdin_and_reports_the_outcome(self) -> None:
-        model = ALL_MODELS[0]
+        model = ALL_MODELS[1]
         code, out, _err = self.run_cli(
             ["profile", "apply", "--stdin-json"],
             stdin=json.dumps(self.selection([model], model)),
@@ -414,6 +457,50 @@ class CommandTests(SettingsTestCase):
         self.assertIn("ERROR:", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(before, self.snapshot())
+
+    def test_models_verify_tools_reads_stdin_and_returns_optional_tool_fields(self) -> None:
+        model = ALL_MODELS[1]
+        candidate = {
+            "id": model,
+            "supported_parameters": ["tools"],
+            "tool_support": "declared",
+            "tool_support_reason": "fixture",
+            "zdr_supported": True,
+        }
+        store = mock.Mock()
+        store.get.return_value = KEY
+        with (
+            mock.patch.object(
+                modelcatalog,
+                "load",
+                return_value={
+                    "schema_version": 1,
+                    "models": [candidate],
+                    "usage_available": False,
+                },
+            ),
+            mock.patch.object(cli, "CredentialStore", return_value=store),
+            mock.patch.object(cli, "stock_build_id", return_value=("26.1", "6720")),
+        ):
+            code, out, _err = self.run_cli(
+                ["models", "verify-tools", "--stdin-json"],
+                stdin=json.dumps({"schema_version": 1, "models": [model]}),
+            )
+        self.assertEqual(0, code)
+        result = json.loads(out)
+        self.assertEqual(1, result["schema_version"])
+        self.assertEqual(model, result["results"][0]["id"])
+        self.assertIn("tool_support", result["results"][0])
+
+    def test_models_verify_tools_rejects_input_before_catalog_network(self) -> None:
+        with mock.patch.object(
+            modelcatalog, "load", side_effect=AssertionError("network attempted")
+        ):
+            code, _out, err = self.run_cli(
+                ["models", "verify-tools", "--stdin-json"], stdin="{"
+            )
+        self.assertEqual(1, code)
+        self.assertIn("verify-toolsの入力がJSONではありません", err)
 
 
 class ModelAdditionTests(SettingsTestCase):
@@ -440,8 +527,11 @@ class ModelAdditionTests(SettingsTestCase):
         )
 
     def add(self, models: list[str], default: str, **kwargs):
-        with mock.patch.object(modelcatalog, "load", return_value=self.catalog):
-            return self.apply(self.selection(models, default), **kwargs)
+        return self.apply(
+            self.selection(models, default),
+            catalog_document=self.catalog,
+            **kwargs,
+        )
 
     def tracked(self) -> list[Path]:
         return [*super().tracked(), self.paths.installed_registry]
@@ -460,6 +550,48 @@ class ModelAdditionTests(SettingsTestCase):
         profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
         self.assertIn(self.NEW, profile.models)
         self.assertEqual(self.NEW, profile.default_model)
+
+    def test_partial_and_unsupported_models_require_exact_acknowledgement(self) -> None:
+        for status in ("partial", "unsupported"):
+            with self.subTest(status=status):
+                toolcompat._atomic_write(
+                    self.paths.tool_compatibility,
+                    {
+                        "schema_version": 1,
+                        "entries": {
+                            self.NEW: {
+                                "chatgpt_build": "unknown",
+                                "tool_contract_version": toolcompat.TOOL_CONTRACT_VERSION,
+                                "status": status,
+                                "reason": "fixture risk",
+                                "verified_at": time.time(),
+                            }
+                        },
+                    },
+                )
+                before = self.snapshot()
+                with self.assertRaises(SettingsError):
+                    self.add([*ALL_MODELS, self.NEW], self.NEW)
+                self.assertEqual(before, self.snapshot())
+
+                payload = self.selection([*ALL_MODELS, self.NEW], self.NEW) | {
+                    "tool_risk_acknowledged": [self.NEW]
+                }
+                result = self.apply(payload, catalog_document=self.catalog)
+                self.assertEqual("applied", result["result"])
+
+                # 次のsubtest向けに初期状態へ戻す。
+                self.setUp()
+
+    def test_tool_canary_transport_failure_changes_no_state(self) -> None:
+        before = self.snapshot()
+        with self.assertRaises(toolcompat.ToolCompatibilityError):
+            self.add(
+                [*ALL_MODELS, self.NEW],
+                self.NEW,
+                verify_error=toolcompat.ToolCompatibilityError("HTTP 429"),
+            )
+        self.assertEqual(before, self.snapshot())
 
     def test_bundled_models_keep_their_japanese_prose_after_an_addition(self) -> None:
         self.add([*ALL_MODELS, self.NEW], self.NEW)
@@ -499,17 +631,15 @@ class ModelAdditionTests(SettingsTestCase):
 
         設定画面での付け外しは大半がこの経路。ここで410件を取ると遅いだけ。
         """
-        with mock.patch.object(modelcatalog, "load", side_effect=AssertionError("取得した")):
-            result = self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+        result = self.apply(self.selection([ALL_MODELS[1]], ALL_MODELS[1]))
         self.assertEqual("applied", result["result"])
 
     def test_removing_an_added_model_keeps_working_without_the_catalog(self) -> None:
         self.add([*ALL_MODELS, self.NEW], self.NEW)
-        with mock.patch.object(modelcatalog, "load", side_effect=AssertionError("取得した")):
-            result = self.apply(self.selection([ALL_MODELS[0]], ALL_MODELS[0]))
+        result = self.apply(self.selection([ALL_MODELS[1]], ALL_MODELS[1]))
         self.assertEqual("applied", result["result"])
         profile = resolve_profile(self.paths.installed_registry, self.paths.installed_profile)
-        self.assertEqual((ALL_MODELS[0],), profile.models)
+        self.assertEqual((ALL_MODELS[1],), profile.models)
 
     def test_re_saving_the_same_selection_after_an_addition_is_a_no_op(self) -> None:
         self.add([*ALL_MODELS, self.NEW], self.NEW)
@@ -542,8 +672,10 @@ class ModelAdditionTests(SettingsTestCase):
             **self.catalog,
             "models": [row for row in self.catalog["models"] if row["id"] != self.NEW],
         }
-        with mock.patch.object(modelcatalog, "load", return_value=without_new):
-            result = self.apply(self.selection([*ALL_MODELS, self.NEW, other], self.NEW))
+        result = self.apply(
+            self.selection([*ALL_MODELS, self.NEW, other], self.NEW),
+            catalog_document=without_new,
+        )
 
         self.assertEqual("applied", result["result"])
         installed = json.loads(self.paths.installed_registry.read_text(encoding="utf-8"))

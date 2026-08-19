@@ -35,6 +35,9 @@ def native(slug: str, visibility: str = "list", priority: int = 1) -> dict:
         "include_apps_usage_instructions": True,
         "node_repl_auto_review_required": False,
         "node_repl_disabled": False,
+        "tool_mode": "code_mode_only",
+        "supports_search_tool": True,
+        "experimental_supported_tools": ["web_search"],
         "additional_speed_tiers": ["fast"],
         "service_tiers": [{"id": "priority", "name": "Fast"}],
         "availability_nux": {"message": "..."},
@@ -114,17 +117,19 @@ class BuildTests(unittest.TestCase):
             self.by_slug["gpt-first"]["include_apps_usage_instructions"], True
         )
 
-    def test_does_not_disable_the_local_js_repl(self):
-        """否定形フィールドを「無効化」側へ倒さないこと。
-
-        `node_repl_disabled` の中和は、native側が将来この値を反転させても
-        cloneが追随しないよう固定するのが目的で、無効化が目的ではない。
-        `True` にするとテンプレートの `tool_mode: code_mode_only` と噛み合って
-        ORモデルからツールを丸ごと奪いかねない。
-        """
+    def test_router_models_use_direct_tools_without_code_mode_or_hosted_search(self):
         for slug in REGISTRY:
-            self.assertIs(self.by_slug[slug]["node_repl_disabled"], False)
+            self.assertIs(self.by_slug[slug]["node_repl_disabled"], True)
             self.assertIs(self.by_slug[slug]["node_repl_auto_review_required"], False)
+            self.assertEqual(self.by_slug[slug]["tool_mode"], "direct")
+            self.assertIs(self.by_slug[slug]["supports_search_tool"], False)
+            self.assertEqual(self.by_slug[slug]["experimental_supported_tools"], [])
+
+        native_entry = self.by_slug["gpt-first"]
+        self.assertIs(native_entry["node_repl_disabled"], False)
+        self.assertEqual(native_entry["tool_mode"], "code_mode_only")
+        self.assertIs(native_entry["supports_search_tool"], True)
+        self.assertEqual(native_entry["experimental_supported_tools"], ["web_search"])
 
     def test_openrouter_priorities_sort_after_natives(self):
         highest_native = max(m["priority"] for m in NATIVES)

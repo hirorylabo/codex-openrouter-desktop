@@ -15,7 +15,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Iterable
 
-from . import pricing
+from . import pricing, toolcompat
 
 OR_PREFIX = "[OR] "
 
@@ -35,11 +35,14 @@ NATIVE_ONLY_FIELDS: dict[str, Any] = {
     "include_apps_usage_instructions": False,
     # auto reviewはnative側の仕組み。ORモデルをそれでgateしない。build 6720で新設。
     "node_repl_auto_review_required": False,
-    # 否定形フィールド。中和値は `True` にしないこと。
-    # `True` は「JS REPLを無効化」の意味で、テンプレートは `tool_mode: code_mode_only`
-    # なのでORモデルからツールを丸ごと奪いかねない。ここでの中和の目的は無効化ではなく、
-    # native側が将来この値を反転させてもcloneが追随しないよう固定することにある。
-    "node_repl_disabled": False,
+    # GPT-5.6向けCode Modeを継承しない。router modelはdirect tool callだけを公開する。
+    "node_repl_disabled": True,
+}
+
+DIRECT_TOOL_FIELDS: dict[str, Any] = {
+    "tool_mode": "direct",
+    "supports_search_tool": False,
+    "experimental_supported_tools": [],
 }
 
 # cloneが継ぐと誤解を招く提示用フィールド。
@@ -162,9 +165,14 @@ def build(
         entry["slug"] = slug
         entry["display_name"] = OR_PREFIX + spec["display_name"]
         if prices is not None and registry is not None:
-            entry["description"] = pricing.describe(slug, spec, prices, registry)
+            description = pricing.describe(slug, spec, prices, registry)
         else:
-            entry["description"] = spec["capability"]
+            description = spec["capability"]
+        tool_status = spec.get("tool_support", "unknown")
+        tool_reason = spec.get("tool_support_reason") or "Codex tool互換は未確認です"
+        entry["description"] = (
+            f"{description}\n\nCodex tool: {tool_status} — {tool_reason}"
+        )
         entry["visibility"] = "list"
         entry["priority"] = max_priority + offset
         entry["supported_in_api"] = True
@@ -190,6 +198,8 @@ def build(
             for field, value in source.items():
                 if field in entry:
                     entry[field] = json.loads(json.dumps(value))
+        for field, value in DIRECT_TOOL_FIELDS.items():
+            entry[field] = json.loads(json.dumps(value))
 
         entries.append(entry)
 
@@ -242,6 +252,12 @@ def validate(
             if field in entry and json.dumps(entry[field]) != json.dumps(neutral):
                 raise CatalogError(
                     f"{slug} の {field} が中和されていません: {entry[field]!r} != {neutral!r}"
+                )
+        for field, expected_value in DIRECT_TOOL_FIELDS.items():
+            if json.dumps(entry.get(field)) != json.dumps(expected_value):
+                raise CatalogError(
+                    f"{slug} の {field} がdirect tool契約と一致しません: "
+                    f"{entry.get(field)!r} != {expected_value!r}"
                 )
 
 
@@ -355,6 +371,7 @@ def generate(
     model_ids: Iterable[str] | None = None,
     snapshot: Path | None = None,
     build_id: tuple[str, str] | None = None,
+    tool_compatibility: Path | None = None,
 ) -> Path:
     """取得 → 価格解決 → 組み立て → 契約検証 → 原子的置換。
 
@@ -367,7 +384,11 @@ def generate(
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     all_models = registry["models"]
     selected = tuple(model_ids) if model_ids is not None else tuple(all_models)
-    registry_models = {model: all_models[model] for model in selected}
+    registry_models = {model: dict(all_models[model]) for model in selected}
+    if tool_compatibility is not None and build_id is not None:
+        _version, build_number = build_id
+        for model, spec in registry_models.items():
+            spec.update(toolcompat.support_for(model, spec, tool_compatibility, build_number))
     prices = pricing.resolve(registry, price_state)
     natives = bundled_models(codex, codex_home)
     document = build(natives, registry_models, prices, registry)
