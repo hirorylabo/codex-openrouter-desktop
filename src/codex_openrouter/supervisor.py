@@ -302,9 +302,17 @@ class Supervisor:
             captured["model"] = configblock.read_top_level(current, "model")
             captured["provider"] = configblock.read_top_level(current, "model_provider")
             current_model = captured["model"]
-            if self.state.pending_default_model or (
-                current_model in self.all_registry_models
-                and current_model not in self.profile.models
+            # 単一model profileでは、専用起動のたびにそのmodelを選び直す。
+            # 選択肢が1つしかないのに native のまま起動すると、利用者から見て
+            # 「専用launcherで起動したのにOpenRouterへ行かない」だけになる。
+            # 複数modelでは利用者のpicker選択を尊重し、pending契約のままにする。
+            if (
+                len(self.profile.models) == 1
+                or self.state.pending_default_model
+                or (
+                    current_model in self.all_registry_models
+                    and current_model not in self.profile.models
+                )
             ):
                 current = configblock.upsert_top_level(
                     current, "model", self.profile.default_model

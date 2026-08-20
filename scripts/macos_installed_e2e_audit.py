@@ -12,6 +12,10 @@ from typing import Any
 
 
 PENDING = 2
+GATES = ("pwd", "apply-patch", "namespace", "dependent", "parallel")
+# gate 4/5が読む、prompt側へ一度も出さないtokenの置き場。
+DEPENDENT_SOURCE_NAME = "toolbridge-e2e-source.txt"
+SINGLE_CALL_GATES = frozenset({"pwd", "apply-patch", "namespace"})
 
 
 def _normalized(text: object) -> str:
@@ -142,6 +146,67 @@ def _call_output(turn: list[dict[str, Any]], call_id: object) -> str:
     return outputs[0]
 
 
+def _assistant_messages(turn: list[dict[str, Any]]) -> list[str]:
+    """turn内のassistant発話を出現順に集める。tool outputは含めない。"""
+    messages: list[str] = []
+    for record in turn:
+        if _is_event(record, "agent_message"):
+            message = _payload(record).get("message")
+            if isinstance(message, str) and message.strip():
+                messages.append(message)
+            continue
+        if record.get("type") != "response_item":
+            continue
+        payload = _payload(record)
+        if payload.get("type") != "message" or payload.get("role") != "assistant":
+            continue
+        content = payload.get("content")
+        if not isinstance(content, list):
+            continue
+        text = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") in {"output_text", "text"}
+            and isinstance(part.get("text"), str)
+        )
+        if text.strip():
+            messages.append(text)
+    return messages
+
+
+def _final_lines(turn: list[dict[str, Any]]) -> list[str]:
+    messages = _assistant_messages(turn)
+    if not messages:
+        raise ValueError("task完了後の最終回答がありません")
+    return [line.strip() for line in messages[-1].strip().splitlines() if line.strip()]
+
+
+def _require_final(turn: list[dict[str, Any]], expected: list[str]) -> None:
+    actual = _final_lines(turn)
+    if actual != expected:
+        raise ValueError(f"最終回答がexact一致しません: {actual!r}")
+
+
+def _command_lines(output: str) -> list[str]:
+    """exec_commandのwrapperを剥がし、exit 0のstdout行だけ返す。"""
+    lines = output.splitlines()
+    if "Output:" not in lines:
+        return lines
+    if "Process exited with code 0" not in lines:
+        raise ValueError("commandがexit 0ではありません")
+    return lines[lines.index("Output:") + 1 :]
+
+
+def _command_result(
+    call: dict[str, Any], turn: list[dict[str, Any]], expected_command: str
+) -> list[str]:
+    arguments = _require_call(call, "exec_command")
+    if arguments != {"cmd": expected_command}:
+        raise ValueError(f"cmdがexact一致しません: {arguments!r}")
+    return _command_lines(_call_output(turn, call.get("call_id")))
+
+
 def _require_call(call: dict[str, Any], name: str) -> dict[str, Any]:
     if call.get("name") != name or call.get("namespace") != "functions":
         actual = f"{call.get('namespace')}.{call.get('name')}"
@@ -150,24 +215,14 @@ def _require_call(call: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _audit_pwd(call: dict[str, Any], turn: list[dict[str, Any]], workspace: str) -> None:
-    if _require_call(call, "exec_command") != {"cmd": "pwd"}:
-        raise ValueError("pwd gateのargumentsがexact一致しません")
-    output = _call_output(turn, call.get("call_id"))
-    lines = output.splitlines()
-    if "Output:" in lines:
-        output_lines = lines[lines.index("Output:") + 1 :]
-        if "Process exited with code 0" not in lines:
-            raise ValueError("pwdがexit 0ではありません")
-    else:
-        output_lines = lines
-    if output_lines != [workspace]:
-        raise ValueError(f"pwd outputがexact workspaceではありません: {output_lines!r}")
+    if _command_result(call, turn, "pwd") != [workspace]:
+        raise ValueError("pwd outputがexact workspaceではありません")
+    _require_final(turn, [workspace])
 
 
 def _audit_patch(
     call: dict[str, Any], turn: list[dict[str, Any]], workspace: str, expected_marker: str
 ) -> None:
-    del turn
     marker_file = Path(workspace) / "toolbridge-e2e.txt"
     expected_content = f"{expected_marker}\n"
     expected_patch = "\n".join(
@@ -187,6 +242,7 @@ def _audit_patch(
         raise ValueError("marker fileのreadbackがexact一致しません")
     if list(Path(workspace).iterdir()) != [marker_file]:
         raise ValueError("workspaceにmarker file以外の内容があります")
+    _require_final(turn, [expected_marker])
 
 
 def _audit_namespace(call: dict[str, Any], turn: list[dict[str, Any]]) -> None:
@@ -199,6 +255,46 @@ def _audit_namespace(call: dict[str, Any], turn: list[dict[str, Any]]) -> None:
         raise ValueError("namespace tool outputがJSONではありません") from exc
     if not isinstance(document, dict) or not isinstance(document.get("resources"), list):
         raise ValueError("namespace tool outputにresources配列がありません")
+    _require_final(turn, [str(len(document["resources"]))])
+
+
+def _audit_dependent(
+    calls: list[dict[str, Any]], turn: list[dict[str, Any]], workspace: str, token: str
+) -> None:
+    """1回目のreadでしか得られない値を2回目のcallが使っていることを確かめる。"""
+    source = Path(workspace) / DEPENDENT_SOURCE_NAME
+    if _command_result(calls[0], turn, f"cat {source}") != [token]:
+        raise ValueError("dependent gate 1回目のoutputがexact一致しません")
+    second_command = _require_call(calls[1], "exec_command")
+    if second_command != {"cmd": f"echo {token}"}:
+        raise ValueError(
+            f"dependent gate 2回目が1回目の結果を使っていません: {second_command!r}"
+        )
+    if _command_lines(_call_output(turn, calls[1].get("call_id"))) != [token]:
+        raise ValueError("dependent gate 2回目のoutputがexact一致しません")
+    _require_final(turn, [token])
+
+
+def _audit_parallel(
+    calls: list[dict[str, Any]], turn: list[dict[str, Any]], workspace: str, token: str
+) -> None:
+    """互いに独立したread-only callを、順序に依存せず集合で比較する。"""
+    source = Path(workspace) / DEPENDENT_SOURCE_NAME
+    expected = {"pwd": [workspace], f"cat {source}": [token]}
+    seen: dict[str, list[str]] = {}
+    for call in calls:
+        arguments = _require_call(call, "exec_command")
+        command = arguments.get("cmd")
+        if set(arguments) != {"cmd"} or not isinstance(command, str):
+            raise ValueError(f"parallel gateのargumentsがcmdだけではありません: {arguments!r}")
+        if command not in expected:
+            raise ValueError(f"parallel gateに想定外のcommandがあります: {command!r}")
+        if command in seen:
+            raise ValueError(f"parallel gateでcommandが重複しています: {command!r}")
+        seen[command] = _command_lines(_call_output(turn, call.get("call_id")))
+    if seen != expected:
+        raise ValueError("parallel gateのcommand集合またはoutputがexact一致しません")
+    _require_final(turn, [workspace, token])
 
 
 def audit(
@@ -240,7 +336,8 @@ def audit(
             }
         turn_id, turn = target
         calls = _tool_calls(turn)
-        if len(calls) != 1:
+        expected_calls = 1 if gate in SINGLE_CALL_GATES else 2
+        if len(calls) != expected_calls:
             raise ValueError(f"対象turnのtool callが{len(calls)}件です")
         if gate == "pwd":
             _audit_pwd(calls[0], turn, workspace)
@@ -250,6 +347,11 @@ def audit(
             _audit_patch(calls[0], turn, workspace, expected_content)
         elif gate == "namespace":
             _audit_namespace(calls[0], turn)
+        elif gate in {"dependent", "parallel"}:
+            if not expected_content:
+                raise ValueError(f"{gate} gateにexpected contentがありません")
+            handler = _audit_dependent if gate == "dependent" else _audit_parallel
+            handler(calls, turn, workspace, expected_content)
         else:
             raise ValueError(f"未知のgateです: {gate}")
         return {
@@ -269,7 +371,7 @@ def main() -> int:
     parser.add_argument("--started-after", type=float, required=True)
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--marker", required=True)
-    parser.add_argument("--gate", choices=("pwd", "apply-patch", "namespace"), required=True)
+    parser.add_argument("--gate", choices=GATES, required=True)
     parser.add_argument("--expected-content")
     args = parser.parse_args()
     result = audit(

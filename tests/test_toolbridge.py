@@ -390,6 +390,80 @@ class RouterMetadataTests(unittest.TestCase):
         self.assertEqual(4, summary.candidate_count)
         self.assertEqual(200, summary.status)
 
+
+class UsageTelemetryTests(unittest.TestCase):
+    """responseに実在する整数のtoken数だけを取り出す。推測も再計算もしない。"""
+
+    def test_responses_usage_shape_is_extracted(self) -> None:
+        summary = toolbridge.extract_usage(
+            {
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 5,
+                    "input_tokens_details": {"cached_tokens": 8},
+                    "total_tokens": 17,
+                }
+            }
+        )
+        self.assertEqual(12, summary.input_tokens)
+        self.assertEqual(5, summary.output_tokens)
+        self.assertEqual(8, summary.cached_tokens)
+        self.assertEqual(
+            {"input_tokens": 12, "output_tokens": 5, "cached_tokens": 8},
+            summary.log_fields(),
+        )
+
+    def test_nested_response_usage_is_extracted(self) -> None:
+        summary = toolbridge.extract_usage(
+            {"type": "response.completed", "response": {"usage": {"output_tokens": 3}}}
+        )
+        self.assertEqual({"output_tokens": 3}, summary.log_fields())
+
+    def test_unknown_or_non_integer_shapes_are_omitted(self) -> None:
+        self.assertIsNone(toolbridge.extract_usage({"usage": {"input_tokens": "12"}}))
+        self.assertIsNone(toolbridge.extract_usage({"usage": {"output_tokens": 1.5}}))
+        self.assertIsNone(toolbridge.extract_usage({"usage": {"input_tokens": -1}}))
+        self.assertIsNone(toolbridge.extract_usage({"usage": {"input_tokens": True}}))
+        self.assertIsNone(toolbridge.extract_usage({"usage": {"prompt_tokens": 9}}))
+        self.assertIsNone(toolbridge.extract_usage({"usage": []}))
+        self.assertIsNone(toolbridge.extract_usage({}))
+
+    def test_usage_never_carries_text_fields(self) -> None:
+        summary = toolbridge.extract_usage(
+            {
+                "usage": {
+                    "input_tokens": 4,
+                    "prompt": "canary-usage-prompt",
+                    "input_tokens_details": {"cached_tokens": 0, "text": "canary"},
+                }
+            }
+        )
+        self.assertEqual({"input_tokens": 4, "cached_tokens": 0}, summary.log_fields())
+
+    def test_sse_bridge_keeps_usage_from_completed_event(self) -> None:
+        prepared = toolbridge.prepare_document(
+            {"model": "m", "tools": [{"type": "custom", "name": "apply_patch"}]}
+        )
+        bridge = toolbridge.SSEBridge(prepared.tool_map)
+        bridge.feed(
+            event(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [],
+                        "usage": {"input_tokens": 7, "output_tokens": 2},
+                    },
+                }
+            )
+        )
+        bridge.feed(b"data: [DONE]\n\n")
+        bridge.finish()
+        self.assertEqual(
+            {"input_tokens": 7, "output_tokens": 2}, bridge.usage.log_fields()
+        )
+
+
+class BuildAllowlistTests(unittest.TestCase):
     def test_build_allowlist_is_exactly_latest_and_previous(self) -> None:
         path = ROOT / "models/tool-wire-builds.json"
         self.assertEqual(("6720", "6662"), toolbridge.supported_builds(path))

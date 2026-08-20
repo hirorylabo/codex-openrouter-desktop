@@ -79,6 +79,49 @@ class RouterSummary:
         return fields
 
 
+@dataclass(frozen=True)
+class UsageSummary:
+    """responseが自分で申告したtoken数だけ。本文も推定値も持たない。"""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+
+    def log_fields(self) -> dict[str, int]:
+        fields: dict[str, int] = {}
+        for name in ("input_tokens", "output_tokens", "cached_tokens"):
+            value = getattr(self, name)
+            if value is not None:
+                fields[name] = value
+        return fields
+
+
+def extract_usage(document: dict[str, Any]) -> UsageSummary | None:
+    """Responses契約に実在する非負整数のtoken数だけを返す。
+
+    `prompt_tokens` のようなChat Completions形や、非整数・未知shapeは
+    読み替えずに省略する。合計や差分の再計算もしない。
+    """
+    if not isinstance(document, dict):
+        return None
+    usage = document.get("usage")
+    if not isinstance(usage, dict):
+        response = document.get("response")
+        usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("input_tokens_details")
+    cached = _safe_int(details.get("cached_tokens")) if isinstance(details, dict) else None
+    if cached is None:
+        cached = _safe_int(usage.get("cached_tokens"))
+    summary = UsageSummary(
+        _safe_int(usage.get("input_tokens")),
+        _safe_int(usage.get("output_tokens")),
+        cached,
+    )
+    return summary if summary.log_fields() else None
+
+
 def supported_builds(path: Path) -> tuple[str, ...]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -437,6 +480,7 @@ class SSEBridge:
         self.buffer = b""
         self.calls: dict[str, _CallState] = {}
         self.summary: RouterSummary | None = None
+        self.usage: UsageSummary | None = None
         self.saw_done = False
 
     def feed(self, chunk: bytes) -> list[bytes]:
@@ -490,6 +534,9 @@ class SSEBridge:
         summary = extract_router_metadata(event)
         if summary is not None:
             self.summary = summary
+        usage = extract_usage(event)
+        if usage is not None:
+            self.usage = usage
         kind = event.get("type")
         if kind == "response.output_item.added":
             return [self._added(event)]

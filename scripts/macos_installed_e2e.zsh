@@ -20,7 +20,10 @@ readonly STOCK_EXECUTABLE="/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
 readonly KEYCHAIN_SERVICE="io.github.hirorylabo.codex-openrouter-desktop"
 readonly WAIT_SECONDS="${CODEX_OPENROUTER_E2E_TIMEOUT:-180}"
 readonly E2E_WORKSPACE="${1:-}"
+readonly DEPENDENT_SOURCE_NAME="toolbridge-e2e-source.txt"
 typeset -g E2E_PROBE_CONTENT=""
+# gate 4/5が読む値。GUIへ送るpromptには一度も出さない（出すと依存の証明にならない）。
+typeset -g E2E_DEPENDENT_CONTENT=""
 
 fail() {
   print -u2 -- "[FAIL] $*"
@@ -201,54 +204,97 @@ wait_gate() {
   fail "$gate gateを${WAIT_SECONDS}秒以内に確認できませんでした（cycle 2へ進みません）"
 }
 
+write_dependent_source() {
+  E2E_DEPENDENT_CONTENT="OR_DEP_$(/usr/bin/python3 -c 'import secrets; print(secrets.token_hex(8))')" \
+    || fail "dependent gate用のtokenを生成できませんでした"
+  /usr/bin/python3 - "$E2E_WORKSPACE/$DEPENDENT_SOURCE_NAME" "$E2E_DEPENDENT_CONTENT" <<'PY' \
+    || fail "dependent gate用のsource fileを作成できませんでした"
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+if path.exists() or path.is_symlink():
+    raise SystemExit(1)
+path.write_text(sys.argv[2] + "\n", encoding="utf-8")
+PY
+}
+
 run_tool_gates() {
   local started_after="$1"
   local run_tag="$(/bin/date +%s)_${$}_${RANDOM}"
   local pwd_marker="OR_E2E_PWD_C1_${run_tag}"
   local patch_marker="OR_E2E_PATCH_C1_${run_tag}"
   local namespace_marker="OR_E2E_NAMESPACE_C1_${run_tag}"
+  local dependent_marker="OR_E2E_DEPENDENT_C1_${run_tag}"
+  local parallel_marker="OR_E2E_PARALLEL_C1_${run_tag}"
+  local source_file="$E2E_WORKSPACE/$DEPENDENT_SOURCE_NAME"
   E2E_PROBE_CONTENT="OR_TOOLBRIDGE_E2E_${run_tag}"
 
   require_empty_workspace
-  print -- "\n=== cycle 1 tool gate 1/3: exact cwd ==="
+  print -- "\n=== cycle 1 tool gate 1/5: exact cwd ==="
   print -- "新しく開いた空のcomposerを使ってください。sidebarの既存taskは開かないでください。"
   print -- "次の1行を一度だけ送信し、完了までChatGPT.appを終了しないでください。"
   print -r -- "$pwd_marker。functions.exec_commandをちょうど1回だけ使い、cmdがpwdだけの空白なしcommandを実行してください。結果はその1行だけ返し、ほかのtool・retry・fallbackは禁止です。"
   wait_gate pwd "$pwd_marker" "" "$started_after"
 
   require_empty_workspace
-  print -- "\n=== cycle 1 tool gate 2/3: apply_patch ==="
+  print -- "\n=== cycle 1 tool gate 2/5: apply_patch ==="
   print -- "次の1行を一度だけ送信してください。readbackはこのharnessが行います。"
-  print -r -- "$patch_marker。functions.apply_patchをちょうど1回だけ使い、$E2E_WORKSPACE/toolbridge-e2e.txt を新規作成して $E2E_PROBE_CONTENT の1行だけを書いてください。ほかのtool・retry・fallback・toolでのreadbackは禁止です。"
+  print -r -- "$patch_marker。functions.apply_patchをちょうど1回だけ使い、$E2E_WORKSPACE/toolbridge-e2e.txt を新規作成して $E2E_PROBE_CONTENT の1行だけを書いてください。完了したら $E2E_PROBE_CONTENT の1行だけを返し、ほかのtool・retry・fallback・toolでのreadbackは禁止です。"
   wait_gate apply-patch "$patch_marker" "$E2E_PROBE_CONTENT" "$started_after"
 
-  print -- "\n=== cycle 1 tool gate 3/3: namespace child ==="
+  print -- "\n=== cycle 1 tool gate 3/5: namespace child ==="
   print -- "次の1行を一度だけ送信してください。browser・search・Node REPLへの代替は禁止です。"
   print -r -- "$namespace_marker。functions.list_mcp_resourcesを空object引数でちょうど1回だけ使い、resources件数だけ返してください。ほかのtool・retry・fallbackは禁止です。"
   wait_gate namespace "$namespace_marker" "" "$started_after"
+
+  write_dependent_source
+  print -- "\n=== cycle 1 tool gate 4/5: 依存した2-call turn ==="
+  print -- "1回目のreadでしか得られない値を2回目のcallが使うことを見ます。値はpromptに出しません。"
+  print -- "次の1行を一度だけ送信してください。"
+  print -r -- "$dependent_marker。functions.exec_commandをちょうど2回だけ順に使ってください。1回目はcmdを「cat $source_file」に完全一致させ、2回目はcmdを「echo 」に1回目の出力1行目をそのまま続けた文字列に完全一致させてください。最終回答はその1行だけにし、ほかのtool・retry・fallbackは禁止です。"
+  wait_gate dependent "$dependent_marker" "$E2E_DEPENDENT_CONTENT" "$started_after"
+
+  print -- "\n=== cycle 1 tool gate 5/5: parallel turn ==="
+  print -- "互いに独立したread-only callだけを使います。順序は問いません。"
+  print -- "次の1行を一度だけ送信してください。"
+  print -r -- "$parallel_marker。functions.exec_commandをちょうど2回だけ同じturnで並行に使ってください。cmdはそれぞれ「pwd」と「cat $source_file」に完全一致させ、順序は問いません。最終回答は1行目にpwdの結果、2行目にfileの内容だけを返し、ほかのtool・retry・fallback・書き込みは禁止です。"
+  wait_gate parallel "$parallel_marker" "$E2E_DEPENDENT_CONTENT" "$started_after"
 }
 
 cleanup_probe() {
   [[ -n "$E2E_WORKSPACE" && -n "$E2E_PROBE_CONTENT" ]] || return 0
   local probe="$E2E_WORKSPACE/toolbridge-e2e.txt"
-  /usr/bin/python3 - "$E2E_WORKSPACE" "$probe" "$E2E_PROBE_CONTENT" <<'PY' \
-    || fail "cleanup前のmarker fileがexact一致しません。削除せず停止します"
+  local source_file="$E2E_WORKSPACE/$DEPENDENT_SOURCE_NAME"
+  /usr/bin/python3 - "$E2E_WORKSPACE" "$probe" "$E2E_PROBE_CONTENT" \
+    "$source_file" "$E2E_DEPENDENT_CONTENT" <<'PY' \
+    || fail "cleanup前のE2E fileがexact一致しません。削除せず停止します"
 from pathlib import Path
 import sys
 
 workspace = Path(sys.argv[1])
 probe = Path(sys.argv[2])
-expected = (sys.argv[3] + "\n").encode()
+source = Path(sys.argv[4])
+source_expected = (sys.argv[5] + "\n").encode() if sys.argv[5] else None
+
+
+def mismatched(path: Path, expected: bytes) -> bool:
+    return path.is_symlink() or not path.is_file() or path.read_bytes() != expected
+
+
+created = [probe] if source_expected is None else [probe, source]
 raise SystemExit(
-    probe.is_symlink()
-    or not probe.is_file()
-    or probe.read_bytes() != expected
-    or list(workspace.iterdir()) != [probe]
+    mismatched(probe, (sys.argv[3] + "\n").encode())
+    or (source_expected is not None and mismatched(source, source_expected))
+    or sorted(workspace.iterdir()) != sorted(created)
 )
 PY
   /bin/rm "$probe" || fail "検証済みE2E marker fileを削除できませんでした"
+  if [[ -n "$E2E_DEPENDENT_CONTENT" ]]; then
+    /bin/rm "$source_file" || fail "検証済みdependent source fileを削除できませんでした"
+  fi
   require_empty_workspace
-  print -- "[PASS] cleanup: 検証済みmarker fileだけを削除し、workspaceは空です"
+  print -- "[PASS] cleanup: 検証済みfileだけを削除し、workspaceは空です"
 }
 
 check_keychain_status() {
@@ -303,7 +349,7 @@ check_keychain_status
 [[ -z "$E2E_WORKSPACE" ]] || require_empty_workspace
 
 if [[ -n "$E2E_WORKSPACE" ]]; then
-  print -- "\n=== installed launcher E2E PASS: lifecycle 2/2 / tool 3/3 / retry 0 ==="
+  print -- "\n=== installed launcher E2E PASS: lifecycle 2/2 / tool 5/5 / retry 0 ==="
 else
   print -- "\n=== installed launcher E2E PASS: lifecycle 2/2 ==="
 fi

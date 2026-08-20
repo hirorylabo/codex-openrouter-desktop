@@ -145,6 +145,21 @@ class Guard:
         return toolbridge.PreparedRequest(document, prepared.tool_map)
 
 
+def tool_telemetry(tool_map: toolbridge.ToolMap, started: float) -> dict[str, object]:
+    """toolを含むupstream requestにだけ足す、本文を持たない集計値。
+
+    `duration_ms` は上流へ投げてから応答を流し終えるまでの経過時間で、
+    prompt・tool名・argumentsのどれにも依存しない。tool以外のrequestには
+    何も足さない。
+    """
+    if not tool_map.has_tools:
+        return {}
+    return {
+        "tool_request": True,
+        "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # SSEを小さい書き込みで流し続けるので、送信側の遅延を持ち込まない。
@@ -216,12 +231,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(503, b'{"error":{"message":"credential unavailable"}}', "application/json")
             return
 
+        started = time.monotonic()
         try:
             status, headers, stream = self.guard.forwarder(
                 prepared.encode(), key, prepared.tool_map.has_tools
             )
         except Exception:
-            self.guard.record(model=model, decision="upstream-error", bytes=len(body))
+            self.guard.record(
+                model=model,
+                decision="upstream-error",
+                bytes=len(body),
+                **tool_telemetry(prepared.tool_map, started),
+            )
             self._send(502, b'{"error":{"message":"upstream failed"}}', "application/json")
             return
 
@@ -231,12 +252,14 @@ class _Handler(BaseHTTPRequestHandler):
                 headers,
                 stream,
                 prepared.tool_map,
-                lambda summary: self.guard.record(
+                lambda summary, usage: self.guard.record(
                     model=model,
                     decision="forwarded",
                     bytes=len(body),
                     status=status,
+                    **tool_telemetry(prepared.tool_map, started),
                     **(summary.log_fields() if summary is not None else {}),
+                    **(usage.log_fields() if usage is not None else {}),
                 ),
             )
         except toolbridge.ToolBridgeError:
@@ -245,6 +268,7 @@ class _Handler(BaseHTTPRequestHandler):
                 decision="bridge-error",
                 bytes=len(body),
                 status=status,
+                **tool_telemetry(prepared.tool_map, started),
             )
             self.close_connection = True
             return
@@ -254,7 +278,9 @@ class _Handler(BaseHTTPRequestHandler):
         headers: dict,
         stream,
         tool_map: toolbridge.ToolMap,
-        on_complete: Callable[[toolbridge.RouterSummary | None], None],
+        on_complete: Callable[
+            [toolbridge.RouterSummary | None, toolbridge.UsageSummary | None], None
+        ],
     ) -> toolbridge.RouterSummary | None:
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
@@ -302,15 +328,16 @@ class _Handler(BaseHTTPRequestHandler):
                     ) from exc
                 if not isinstance(document, dict):
                     raise toolbridge.ToolBridgeError("OpenRouter responseがobjectではありません")
+                usage = toolbridge.extract_usage(document)
                 transformed, summary = toolbridge.transform_response_document(document, tool_map)
                 self._write_chunk(json.dumps(transformed, ensure_ascii=False).encode("utf-8"))
-                on_complete(summary)
+                on_complete(summary, usage)
                 completed = True
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
                 return summary
             summary = bridge.summary if bridge is not None else None
-            on_complete(summary)
+            on_complete(summary, bridge.usage if bridge is not None else None)
             completed = True
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()

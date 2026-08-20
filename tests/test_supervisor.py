@@ -397,19 +397,75 @@ class ProfileRuntimeTests(SupervisorTestCase):
         watcher.assert_called_once_with(self.paths.shared_config, (model,))
 
     def test_profile_default_is_applied_once(self):
-        self.supervisor.apply_config(8791)
+        """複数model profileでは既定modelを一度だけ適用する（既存契約）。"""
+        profile = self.multi_model_profile()
+        first = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        first.apply_config(8791)
         self.assertEqual(
             configblock.read_top_level(self.config_text(), "model"),
-            self.supervisor.profile.default_model,
+            profile.default_model,
         )
-        self.supervisor.cleanup()
-        configblock.edit(
-            self.paths.shared_config,
-            lambda text: configblock.upsert_top_level(text, "model", "gpt-5.6-sol"),
-        )
-        revived = sup.Supervisor(self.paths, REGISTRY_PATH, port=0)
+        first.cleanup()
+        self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        self.assertFalse(revived.state.pending_default_model)
         revived.apply_config(49152)
         self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+
+    @staticmethod
+    def multi_model_profile() -> ResolvedProfile:
+        models = ("deepseek/deepseek-v4-flash-0731", "z-ai/glm-5.2")
+        return ResolvedProfile(
+            name="multi",
+            models=models,
+            default_model=models[0],
+            default_effort=REGISTRY[models[0]].get("default_effort"),
+            registry={model: REGISTRY[model] for model in models},
+        )
+
+
+class SingleModelSelectionTests(SupervisorTestCase):
+    """単一model profileでは、専用起動のたびにそのmodelを選び直す。"""
+
+    def prime_pending(self) -> sup.Supervisor:
+        """pending_default_modelを消化し、nativeへ戻した状態から始める。"""
+        self.supervisor.apply_config(8791)
+        self.supervisor.cleanup()
+        self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, port=0)
+        self.assertEqual(1, len(revived.profile.models))
+        self.assertFalse(revived.state.pending_default_model)
+        return revived
+
+    def test_single_model_is_selected_even_when_pending_is_false(self):
+        revived = self.prime_pending()
+        revived.apply_config(49152)
+        text = self.config_text()
+        self.assertEqual(
+            configblock.read_top_level(text, "model"), revived.profile.default_model
+        )
+        self.assertEqual(configblock.read_top_level(text, "model_provider"), "openrouter")
+
+    def test_single_model_cleanup_restores_native_model_and_provider(self):
+        revived = self.prime_pending()
+        revived.apply_config(49152)
+        revived.cleanup()
+        text = self.config_text()
+        self.assertEqual(configblock.read_top_level(text, "model"), "gpt-5.6-sol")
+        self.assertEqual(configblock.read_top_level(text, "model_provider"), "openai")
+
+    def test_multi_model_profile_keeps_native_selection_when_pending_is_false(self):
+        profile = ProfileRuntimeTests.multi_model_profile()
+        first = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        first.apply_config(8791)
+        first.cleanup()
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        self.assertFalse(revived.state.pending_default_model)
+        revived.apply_config(49152)
+        text = self.config_text()
+        self.assertEqual(configblock.read_top_level(text, "model"), "gpt-5.6-sol")
+        self.assertNotEqual(configblock.read_top_level(text, "model_provider"), "openrouter")
 
 
 if __name__ == "__main__":

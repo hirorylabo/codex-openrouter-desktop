@@ -189,6 +189,158 @@ class LoggingTests(GuardTestCase):
         self.assertNotIn("sk-or-test-key", text)
 
 
+class ToolTelemetryTests(GuardTestCase):
+    """toolを含むupstream requestに、漏れないtelemetryだけを足す。"""
+
+    # guard logに出てよいkeyの全集合。増やすときは非漏洩を先に証明すること。
+    ALLOWED_KEYS = frozenset(
+        {
+            "t",
+            "model",
+            "decision",
+            "bytes",
+            "status",
+            "provider",
+            "provider_attempt",
+            "candidate_count",
+            "router_status",
+            "tool_request",
+            "duration_ms",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+        }
+    )
+    CANARIES = (
+        "canary-user-prompt-4412",
+        "canary_tool_name",
+        "canary-tool-argument",
+        "canary-tool-output",
+        "canary-pipeline-secret",
+        "sk-or-test-key",
+        "openrouter_metadata",
+        "pipeline",
+    )
+
+    def tool_post(self, payload: bytes, content_type: str = "text/event-stream"):
+        status = self.forwarder.status
+
+        def forward(body, key, metadata_enabled):
+            self.forwarder.calls.append((body, key, metadata_enabled))
+            return status, {"Content-Type": content_type}, io.BytesIO(payload)
+
+        self.guard.forwarder = forward
+        return self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "canary-user-prompt-4412",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "canary_tool_name",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    }
+                ],
+            }
+        )
+
+    @staticmethod
+    def completed_stream(usage: dict | None = None, metadata: bool = True) -> bytes:
+        response: dict = {"output": []}
+        if usage is not None:
+            response["usage"] = usage
+        document: dict = {"type": "response.completed", "response": response}
+        if metadata:
+            document["openrouter_metadata"] = {
+                "attempts": [{"provider_name": "Example", "status": 200}],
+                "endpoints": [{}],
+                "pipeline": [{"note": "canary-pipeline-secret"}],
+            }
+        return (
+            b"data: " + json.dumps(document).encode() + b"\n\n" + b"data: [DONE]\n\n"
+        )
+
+    def test_tool_request_records_only_allowed_safe_fields(self):
+        status, payload = self.tool_post(
+            self.completed_stream(
+                {
+                    "input_tokens": 41,
+                    "output_tokens": 7,
+                    "input_tokens_details": {"cached_tokens": 32},
+                }
+            )
+        )
+        self.assertEqual(200, status)
+        self.assertNotIn(b"openrouter_metadata", payload)
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertIs(True, record["tool_request"])
+        self.assertIsInstance(record["duration_ms"], int)
+        self.assertGreaterEqual(record["duration_ms"], 0)
+        self.assertEqual(41, record["input_tokens"])
+        self.assertEqual(7, record["output_tokens"])
+        self.assertEqual(32, record["cached_tokens"])
+        text = self.log.read_text()
+        for canary in self.CANARIES:
+            self.assertNotIn(canary, text)
+
+    def test_non_tool_request_has_no_tool_telemetry(self):
+        self.post({"model": "z-ai/glm-5.2", "input": "hi"})
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        for name in ("tool_request", "duration_ms", "input_tokens", "output_tokens",
+                     "cached_tokens"):
+            self.assertNotIn(name, record)
+
+    def test_unknown_usage_shape_is_omitted_but_duration_is_kept(self):
+        self.tool_post(
+            self.completed_stream({"input_tokens": "41", "total": {"output_tokens": 7}})
+        )
+        record = self.log_records()[0]
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        for name in ("input_tokens", "output_tokens", "cached_tokens"):
+            self.assertNotIn(name, record)
+
+    def test_auth_failure_without_metadata_is_not_classified(self):
+        self.forwarder.status = 401
+        self.tool_post(
+            b'{"error":{"message":"canary-tool-output"}}', content_type="application/json"
+        )
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertEqual("forwarded", record["decision"])
+        self.assertEqual(401, record["status"])
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        self.assertNotIn("provider", record)
+        self.assertNotIn("canary-tool-output", self.log.read_text())
+
+    def test_upstream_failure_still_records_tool_request_without_body(self):
+        def explode(body, key, metadata_enabled):
+            raise OSError("canary-tool-output")
+
+        self.guard.forwarder = explode
+        self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "canary-user-prompt-4412",
+                "tools": [{"type": "custom", "name": "canary_tool_name"}],
+            }
+        )
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertEqual("upstream-error", record["decision"])
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        text = self.log.read_text()
+        for canary in self.CANARIES:
+            self.assertNotIn(canary, text)
+
+
 class ZdrTests(GuardTestCase):
     def test_forwarded_body_forces_zdr(self):
         self.post({"model": "z-ai/glm-5.2", "input": "hi"})

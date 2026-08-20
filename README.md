@@ -141,7 +141,7 @@ OpenRouterが配信しているモデルの一覧から選びます。任意slug
 - 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます（任意）。
 - 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認します。未検査の新規モデルは、少額課金の確認後に実運用と同じTool Bridge wireでstructured/freeformのcanaryを実行します。認証失敗、429、5xx、通信失敗では非対応と決めつけず、profileもtool cacheも変更しません。
 - `partial` / `unsupported`も選択できますが、`exec`・`apply_patch`などのdirect toolが動かない可能性を表示し、exact model IDの明示承認後だけ保存します。
-- 保存に成功すると「次回のOpenRouter起動から反映」と表示します。既定モデルは次の専用起動で一度だけ適用されます。
+- 保存に成功すると「次回のOpenRouter起動から反映」と表示します。表示モデルが2件以上のprofileでは、既定モデルは次の専用起動で一度だけ適用され、以後はpickerの選択を尊重します。表示モデルが1件だけのprofileでは、選択肢が他に無いため専用起動のたびにそのモデルと`model_provider = "openrouter"`を選び直します（終了時はnative既定へ戻します）。
 - OpenRouterモード稼働中は編集できません（「ChatGPT終了後に変更できます」と表示します）。
 - 画面はAPI keyを取得も表示もしません。検証はPython CLIがKeychainから直接読み、値はUIへ渡りません。
 
@@ -216,6 +216,8 @@ guard内のprotocol処理は[`src/codex_openrouter/toolbridge.py`](./src/codex_o
 
 toolを含むrequestでは価格sortを指定せず、既定の[Auto Exacto](https://openrouter.ai/docs/guides/routing/auto-exacto)を利用します。併せて`X-OpenRouter-Metadata: enabled`を送り、最終chunkからprovider・試行番号・候補数・statusだけをguard logへ残します。`openrouter_metadata`本体、pipeline、prompt、tool argumentsはCodexにもlogにも残しません。cache hitや認証・rate limit・5xxでmetadataが無いことはtool非対応判定に使いません。
 
+toolを含むupstream requestには、これに加えて`tool_request`・`duration_ms`と、responseが申告した整数の`input_tokens`・`output_tokens`・`cached_tokens`だけを残します。`duration_ms`は上流へ投げてから応答を流し終えるまでの経過時間で、prompt・tool名・argumentsに依存しません。非整数や未知shapeのusageは読み替えず省略し、合計や差分の再計算もしません。
+
 `codex-relay`はruntime依存ではありません。参照commit、参照file hash、採用・不採用の境界は[`UPSTREAMS.md`](./UPSTREAMS.md)に固定し、週次CIは差分を報告するだけで自動mergeしません。
 
 同梱registryに無いmodelを選ぶと、`models list`のエントリから導入済みregistry（`~/.local/share/codex-openrouter-desktop/state/registry.json`）を実体化し、**同じtransactionへ載せます**。片方だけ進むと「選んだmodelがregistryに無い」状態で次の起動に入るためです。registryのエントリはライブAPIから毎回導出し直し、同梱registryが持つ日本語の説明文だけを残します。
@@ -246,7 +248,7 @@ codex-openrouter guard-log
 
 guardが中継したmodelと遮断したmodelを集計します。遮断側に出るのが巻き込みです。Codexの更新で背景機能が増減するので、更新後にこれを見てください。現時点で判明しているのは`gpt-5.6-luna`（ambient suggestionsとその安全性分類）です。
 
-guardは許可集合（[`models/registry.json`](./models/registry.json)の5モデル）以外を**1バイトも外へ出さずに**400で止めます。guard logにはmodel・判定・バイト数・時刻だけを記録し、本文と鍵は残しません。
+guardは許可集合（[`models/registry.json`](./models/registry.json)の5モデル）以外を**1バイトも外へ出さずに**400で止めます。guard logにはmodel・判定・バイト数・時刻と、tool requestのrouter集計値・所要時間・token数だけを記録し、本文と鍵は残しません。
 
 ## 価格表示
 
@@ -280,7 +282,7 @@ python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-
 unit test runnerはloopback以外のsocket接続を遮断し、差し替え漏れによる実通信を失敗にします。
 CLIのJSON fieldを増減したら`tests/fixtures/launcher-*.json`とdecoder compatを同時に更新してください。
 
-実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。空のworkspaceを引数に渡した場合、cycle 1は新しく開いたchatで`pwd`・`apply_patch`・namespace childを各1回だけ実行し、JSONLのexact cwd・tool・arguments・outputを監査します。既存chatをresumeすると保存済みcwdが優先されるため、監査はそこで停止し、cycle 2を起動しません。`--open-project`は現行ChatGPT buildの内部契約であり、最終判定には使いません。
+実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。空のworkspaceを引数に渡した場合、cycle 1は新しく開いたchatで5 gatesを実行します。`pwd`・`apply_patch`・namespace childを各1回、続けて先行するread結果を次のcallへ使う依存2-call turnと、互いに独立したread-only commandを2件呼ぶparallel turnです。JSONLのexact cwd・tool・arguments・output・最終回答を監査し、parallel gateだけは順序に依存せず集合で比較します。依存gateが読む値はharnessが生成してworkspaceへ置き、GUIへ送るpromptには一度も出しません。既存chatをresumeすると保存済みcwdが優先されるため、監査はそこで停止し、cycle 2を起動しません。`--open-project`は現行ChatGPT buildの内部契約であり、最終判定には使いません。
 
 ```bash
 PYTHONPATH=src python3 scripts/macos_live_e2e.py
