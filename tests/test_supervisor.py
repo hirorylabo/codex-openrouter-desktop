@@ -377,12 +377,27 @@ class WorkspaceDeliveryTests(LaunchTests):
     def test_workspace_is_delivered_through_the_open_document_path(self):
         workspace = self.root / "workspace"
         self.supervisor.workspace = workspace
-        run = self.run_delivery([0])
+        run = self.run_delivery([0, 0])
+        for call in run.call_args_list:
+            self.assertEqual(
+                ["/usr/bin/open", "-b", self.BUNDLE_IDENTIFIER, str(workspace)],
+                call.args[0],
+            )
+        # appの復元に上書きされないよう、落ち着かせてから複数回送る。
+        self.assertEqual(sup.WORKSPACE_DELIVERY_REPEATS, run.call_count)
+
+    def test_delivery_waits_before_each_send(self):
+        """早すぎるopenはappの前回project復元に上書きされる。必ず待ってから送る。"""
+        self.supervisor.workspace = self.root / "workspace"
+        self.stock_executable()
+        with mock.patch.object(sup, "process_pids", return_value=[4321]), \
+             mock.patch.object(sup.time, "sleep") as sleep, \
+             mock.patch.object(sup.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            self.supervisor.deliver_workspace()
+        settles = [call.args[0] for call in sleep.call_args_list]
         self.assertEqual(
-            ["/usr/bin/open", "-b", self.BUNDLE_IDENTIFIER, str(workspace)],
-            run.call_args.args[0],
+            [sup.WORKSPACE_SETTLE_SECONDS] * sup.WORKSPACE_DELIVERY_REPEATS, settles
         )
-        self.assertEqual(1, run.call_count)
 
     def test_no_workspace_sends_nothing(self):
         self.supervisor.workspace = None

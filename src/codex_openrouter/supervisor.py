@@ -41,7 +41,11 @@ from .profile import ResolvedProfile, active_registry, installed_profile
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
 # 起動直後のappがopen document eventを受け取れるまで待つ上限。無限には待たない。
-WORKSPACE_DELIVERY_SECONDS = 30
+WORKSPACE_DELIVERY_SECONDS = 45
+# appは起動後に前回のprojectを非同期で復元する。早すぎるopenはその復元に
+# 上書きされるため、落ち着くのを待ってから送り、最後のeventを勝たせる。
+WORKSPACE_SETTLE_SECONDS = 5
+WORKSPACE_DELIVERY_REPEATS = 2
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
 STATE_SCHEMA_VERSION = 4
 
@@ -403,6 +407,12 @@ class Supervisor:
             if time.monotonic() >= deadline:
                 raise SupervisorError("純正appの起動を確認できず、workspaceを渡せませんでした")
             time.sleep(0.5)
+        for _ in range(WORKSPACE_DELIVERY_REPEATS):
+            time.sleep(WORKSPACE_SETTLE_SECONDS)
+            self.send_workspace(identifier, deadline)
+
+    def send_workspace(self, identifier: str, deadline: float) -> None:
+        """open eventを1回届ける。失敗している間だけ期限まで再試行する。"""
         while True:
             result = subprocess.run(
                 ["/usr/bin/open", "-b", identifier, str(self.workspace)],
