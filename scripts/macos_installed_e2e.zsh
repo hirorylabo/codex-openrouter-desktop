@@ -177,7 +177,7 @@ wait_gate() {
   local marker="$2"
   local expected_content="${3:-}"
   local deadline=$((SECONDS + WAIT_SECONDS))
-  local output status
+  local output audit_status
   local -a arguments
   arguments=(
     --sessions-root "$SESSIONS_ROOT"
@@ -193,8 +193,8 @@ wait_gate() {
       print -- "[PASS] $gate gate: $output"
       return 0
     else
-      status=$?
-      (( status == 2 )) || fail "$gate gate: $output（自動retry・fallbackなし、cycle 2へ進みません）"
+      audit_status=$?
+      (( audit_status == 2 )) || fail "$gate gate: $output（自動retry・fallbackなし、cycle 2へ進みません）"
     fi
     /bin/sleep 1
   done

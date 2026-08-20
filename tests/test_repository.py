@@ -426,6 +426,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("wait_gate apply-patch", source)
         self.assertIn("wait_gate namespace", source)
         self.assertIn("stock_running || fail", source)
+        # zshのread-only特殊parameter `status`をlocal変数に使わない。
+        self.assertIn("local output audit_status", source)
+        self.assertIn("audit_status=$?", source)
+        self.assertNotIn("local output status", source)
         execution = [
             source.rfind("run_cycle 1\n"),
             source.rfind("cleanup_probe\n"),
