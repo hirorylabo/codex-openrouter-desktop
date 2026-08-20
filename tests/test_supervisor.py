@@ -328,7 +328,7 @@ class ExclusionTests(SupervisorTestCase):
 
 
 class LaunchTests(SupervisorTestCase):
-    def test_launch_never_passes_real_key_to_stock_app(self):
+    def test_launch_uses_explicit_project_flag_and_never_passes_real_key(self):
         executable = self.paths.stock_app / "Contents/MacOS/ChatGPT"
         executable.parent.mkdir(parents=True)
         executable.touch()
@@ -343,7 +343,10 @@ class LaunchTests(SupervisorTestCase):
 
         arguments = popen.call_args.args[0]
         environment = popen.call_args.kwargs["env"]
-        self.assertEqual(arguments, [str(executable), str(self.supervisor.workspace)])
+        self.assertEqual(
+            arguments,
+            [str(executable), "--open-project", str(self.supervisor.workspace)],
+        )
         self.assertNotIn("OPENROUTER_API_KEY", environment)
         self.assertEqual(environment["SAFE_VALUE"], "kept")
 

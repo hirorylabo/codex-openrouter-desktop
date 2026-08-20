@@ -111,7 +111,7 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
             noticeLabel.textColor = .systemOrange
         } else if toolRisk > 0 {
             noticeLabel.stringValue = "Codex tool互換が不完全なモデルを\(toolRisk)件使用中です。"
-                + "exec・browser・search・apply_patchが動かない可能性があります。"
+                + "exec・apply_patchなどのdirect toolが動かない可能性があります。"
             noticeLabel.textColor = .systemOrange
         } else {
             noticeLabel.stringValue = ""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -81,6 +82,54 @@ class ProcessTests(unittest.TestCase):
 
 
 class PromotionTests(unittest.TestCase):
+    def test_app_bundle_swap_never_renames_the_live_app_across_directories(self) -> None:
+        """provenance付きappのcross-directory renameはmacOSで停止しうる。"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            live = root / "Desktop/Codex OpenRouter.app"
+            staged = root / "staged/Codex OpenRouter.app"
+            live.mkdir(parents=True)
+            staged.mkdir(parents=True)
+            (live / "version").write_text("old", encoding="utf-8")
+            (staged / "version").write_text("new", encoding="utf-8")
+            backup = root / "backup"
+
+            with mock.patch(
+                "codex_openrouter.promotion.os.replace", wraps=os.replace
+            ) as replace:
+                atomic_promote([(staged, live)], backup, lambda: None)
+
+            calls = [tuple(call.args) for call in replace.call_args_list]
+            adjacent = live.parent / f".{live.name}.upgrade-old"
+            self.assertIn((live, adjacent), calls)
+            self.assertNotIn((live, backup / "originals/0"), calls)
+            self.assertEqual("new", (live / "version").read_text())
+            self.assertEqual("old", (backup / "originals/0/version").read_text())
+            self.assertFalse(adjacent.exists())
+
+    def test_failed_app_bundle_verification_restores_the_adjacent_original(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            live = root / "Desktop/Codex OpenRouter.app"
+            staged = root / "staged/Codex OpenRouter.app"
+            live.mkdir(parents=True)
+            staged.mkdir(parents=True)
+            (live / "version").write_text("old", encoding="utf-8")
+            (staged / "version").write_text("new", encoding="utf-8")
+            backup = root / "backup"
+
+            with self.assertRaises(PromotionError):
+                atomic_promote(
+                    [(staged, live)],
+                    backup,
+                    lambda: (_ for _ in ()).throw(RuntimeError("doctor failed")),
+                )
+
+            self.assertEqual("old", (live / "version").read_text())
+            self.assertEqual("old", (backup / "originals/0/version").read_text())
+            self.assertEqual("new", (backup / "failed-new/0/version").read_text())
+            self.assertFalse((live.parent / f".{live.name}.upgrade-old").exists())
+
     def test_promotion_keeps_recoverable_originals(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

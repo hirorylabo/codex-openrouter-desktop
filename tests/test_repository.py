@@ -341,6 +341,12 @@ class RepositoryTests(unittest.TestCase):
         # 既定を外したら黙って他へ寄せない。
         self.assertIn("defaultModel = nil", swift)
 
+    def test_tool_status_is_scoped_to_direct_tools(self) -> None:
+        """verifiedを、無効化しているbrowser/searchまでの保証に見せない。"""
+        swift = launcher_swift()
+        self.assertIn("browser・search・Node REPLは検証対象外", swift)
+        self.assertNotIn("exec・browser・search・apply_patch", swift)
+
     def test_adding_a_non_zdr_model_is_confirmed_rather_than_silent(self) -> None:
         """ZDRなしの追加は既定の安全性を下げる。黙って通す経路を作らない。
 
@@ -414,6 +420,34 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("profile show --json", source)
         self.assertIn("OpenRouterで起動", source)
         self.assertIn("manual_checklist", source)
+        # cycle 1のtool監査が終わるまでcycle 2へ進まない。
+        self.assertIn("run_tool_gates", source)
+        self.assertIn("wait_gate pwd", source)
+        self.assertIn("wait_gate apply-patch", source)
+        self.assertIn("wait_gate namespace", source)
+        self.assertIn("stock_running || fail", source)
+        execution = [
+            source.rfind("run_cycle 1\n"),
+            source.rfind("cleanup_probe\n"),
+            source.rfind("run_cycle 2\n"),
+            source.rfind("check_keychain_status\n"),
+        ]
+        self.assertEqual(sorted(execution), execution)
+
+    def test_installed_e2e_can_fail_closed_on_an_exact_empty_workspace(self) -> None:
+        """実機tool試験はexact bundle/workspaceを固定し、open失敗を迂回しない。"""
+        source = (ROOT / "scripts/macos_installed_e2e.zsh").read_text(encoding="utf-8")
+        self.assertIn('LAUNCHER_BUNDLE_ID="local.codex.openrouter.launcher"', source)
+        self.assertIn('E2E_WORKSPACE="${1:-}"', source)
+        self.assertIn('/usr/bin/open -b "$LAUNCHER_BUNDLE_ID" "$E2E_WORKSPACE"', source)
+        self.assertIn('AUDITOR="$SCRIPT_DIR/macos_installed_e2e_audit.py"', source)
+        self.assertIn("--started-after", source)
+        self.assertIn("require_empty_workspace", source)
+        self.assertNotIn("EPOCHSECONDS", source)
+        self.assertIn("自動retry・別経路fallback禁止", source)
+        self.assertNotIn("print_workspace_gate", source)
+        self.assertNotIn("/usr/bin/lsappinfo info -only WindowList", source)
+        self.assertNotIn('|| /usr/bin/open "$LAUNCHER"', source)
 
     def test_live_e2e_removes_auth_copy_even_when_cleanup_raises(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

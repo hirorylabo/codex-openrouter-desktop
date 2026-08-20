@@ -298,6 +298,7 @@ final class ModelCatalogTable: NSObject, NSTableViewDataSource, NSTableViewDeleg
         let field = label(lines.joined(separator: "\n"), secondary: status == "declared")
         field.maximumNumberOfLines = 2
         var details = [entry.toolSupportReason ?? "互換性の根拠はありません。"]
+        details.append("対象: direct structured/freeform（browser・search・Node REPLは検証対象外）")
         if let provider = entry.toolProvider, !provider.isEmpty {
             var providerLine = "検証provider: \(provider)"
             if let attempt = entry.toolProviderAttempt {

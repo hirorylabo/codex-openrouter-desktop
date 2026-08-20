@@ -129,6 +129,8 @@ OpenRouterが配信しているモデルの一覧から選びます。任意slug
 - `unknown`: metadataを解釈不能
 - `unsupported`: `tools`非対応、またはdirect function callを実測できない
 
+これらはdirect structured/freeform toolだけの判定です。browser・search・Node REPLは含みません。
+
 - 並び替え: モデル名・入力価格・出力価格・公開日・7dトークン利用量の列名をクリック。同じ列を再クリックすると降順 / 昇順が切り替わります。
 - 絞り込み: モデル名検索、`ZDRのみ`（既定ON）、`学習なしのみ`、`無料のみ`、`reasoningのみ`、`tool非対応も表示（N件）`
 - 選択済みは常に先頭へ固定され、絞り込みでも消えません。
@@ -138,7 +140,7 @@ OpenRouterが配信しているモデルの一覧から選びます。任意slug
 - 最低1モデルが必須です。既定モデルを外した場合は、新しい既定を明示選択するまで保存できません。
 - 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます（任意）。
 - 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認します。未検査の新規モデルは、少額課金の確認後に実運用と同じTool Bridge wireでstructured/freeformのcanaryを実行します。認証失敗、429、5xx、通信失敗では非対応と決めつけず、profileもtool cacheも変更しません。
-- `partial` / `unsupported`も選択できますが、`exec`・browser・search・`apply_patch`が動かない可能性を表示し、exact model IDの明示承認後だけ保存します。
+- `partial` / `unsupported`も選択できますが、`exec`・`apply_patch`などのdirect toolが動かない可能性を表示し、exact model IDの明示承認後だけ保存します。
 - 保存に成功すると「次回のOpenRouter起動から反映」と表示します。既定モデルは次の専用起動で一度だけ適用されます。
 - OpenRouterモード稼働中は編集できません（「ChatGPT終了後に変更できます」と表示します）。
 - 画面はAPI keyを取得も表示もしません。検証はPython CLIがKeychainから直接読み、値はUIへ渡りません。
@@ -278,11 +280,12 @@ python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-
 unit test runnerはloopback以外のsocket接続を遮断し、差し替え漏れによる実通信を失敗にします。
 CLIのJSON fieldを増減したら`tests/fixtures/launcher-*.json`とdecoder compatを同時に更新してください。
 
-実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。
+実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。空のworkspaceを引数に渡した場合、cycle 1は新しく開いたchatで`pwd`・`apply_patch`・namespace childを各1回だけ実行し、JSONLのexact cwd・tool・arguments・outputを監査します。既存chatをresumeすると保存済みcwdが優先されるため、監査はそこで停止し、cycle 2を起動しません。`--open-project`は現行ChatGPT buildの内部契約であり、最終判定には使いません。
 
 ```bash
 PYTHONPATH=src python3 scripts/macos_live_e2e.py
 scripts/macos_installed_e2e.zsh
+scripts/macos_installed_e2e.zsh /private/tmp/codex-openrouter-e2e.EMPTY
 ```
 
 セキュリティ報告は[`SECURITY.md`](./SECURITY.md)、第三者コードは[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)を参照してください。

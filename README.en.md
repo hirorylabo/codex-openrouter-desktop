@@ -65,14 +65,14 @@ The launcher is a regular macOS app with a Dock icon and an application menu, bu
 
 The settings screen opens from the panel, the application menu, or `⌘,`. It lists the models OpenRouter actually serves and lets you pick one default among the selected ones. There is no entry point for arbitrary slugs. Models without tool support remain discoverable and are hidden by default rather than silently discarded. The `Codex tool / provider` column shows the measured provider; its tooltip includes the verification time and attempt number.
 
-The column reports `verified` (structured and freeform canaries passed through the Tool Bridge), `partial` (structured passed, freeform failed), `declared` (OpenRouter advertises `tools`, not measured), `unknown`, or `unsupported`. The **tool非対応も表示 (N)** control reveals unsupported rows; selected rows always remain visible.
+The column reports `verified` (structured and freeform canaries passed through the Tool Bridge), `partial` (structured passed, freeform failed), `declared` (OpenRouter advertises `tools`, not measured), `unknown`, or `unsupported`. These statuses cover direct structured/freeform tools only; they do not cover browser, search, or Node REPL. The **tool非対応も表示 (N)** control reveals unsupported rows; selected rows always remain visible.
 
 Usage is **token volume, not connection count** — that is all OpenRouter publishes, and only for the top 50 models per day. Anything outside that shows `—` rather than zero.
 
 - At least one model is required. Removing the current default disables saving until a new default is chosen explicitly.
 - **OpenRouter Guardrailを開く** opens the Guardrail settings page (optional).
 - **検証して保存** runs low-token structured/freeform canaries using the same bridge wire as runtime for newly selected, unmeasured models after a possible-charge confirmation. Authentication errors, 429, 5xx, and transport failures are not classified as unsupported and change neither the tool cache nor the profile.
-- `partial` and `unsupported` models remain selectable only after an exact-model warning that `exec`, browser, search, and `apply_patch` may fail.
+- `partial` and `unsupported` models remain selectable only after an exact-model warning that direct tools such as `exec` and `apply_patch` may fail.
 - A successful save reports that the change takes effect on the next OpenRouter launch, where the new default model is applied exactly once.
 - Editing is disabled while OpenRouter mode is running.
 - The screen never reads or displays the API key. Validation happens in the Python CLI, which reads the Keychain directly.
@@ -144,11 +144,12 @@ python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-
 
 `compileall` checks syntax; `ruff` is the gate that catches undefined names such as `F821`. The unit-test runner rejects every non-loopback socket destination so a missing network stub fails closed. Update `tests/fixtures/launcher-*.json` together with the decoder harness whenever CLI JSON fields change.
 
-For manual checks with the real ChatGPT.app, run the isolated-home E2E first. After upgrading the installed runtime, run two launcher cycles; the latter command asks you to quit ChatGPT.app normally during each cycle.
+For manual checks with the real ChatGPT.app, run the isolated-home E2E first. After upgrading the installed runtime, run two launcher cycles; the latter command asks you to quit ChatGPT.app normally during each cycle. When passed an empty workspace, cycle 1 asks you to use the newly opened chat for one `pwd`, one `apply_patch`, and one namespace-child call. A read-only JSONL audit requires the exact cwd, tool, arguments, and output before the harness can continue. Resuming an existing chat preserves its stored cwd, so that mismatch stops the run before cycle 2. Treat `--open-project` as a current-build internal contract rather than the acceptance signal.
 
 ```bash
 PYTHONPATH=src python3 scripts/macos_live_e2e.py
 scripts/macos_installed_e2e.zsh
+scripts/macos_installed_e2e.zsh /private/tmp/codex-openrouter-e2e.EMPTY
 ```
 
 See the Japanese README for the full operational details, [`SECURITY.md`](./SECURITY.md) for vulnerability reporting, and [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for third-party licensing.

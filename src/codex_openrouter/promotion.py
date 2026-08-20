@@ -29,6 +29,13 @@ def _copy(source: Path, target: Path) -> None:
         shutil.copy2(source, target)
 
 
+def _remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
 def atomic_promote(
     replacements: Iterable[tuple[Path | None, Path]],
     backup_root: Path,
@@ -44,7 +51,7 @@ def atomic_promote(
     failed = backup_root / "failed-new"
     originals.mkdir(mode=0o700)
     failed.mkdir(mode=0o700)
-    prepared: list[tuple[Path | None, Path, Path | None]] = []
+    prepared: list[tuple[Path | None, Path, Path | None, Path | None]] = []
     report: dict = {"schema_version": 1, "result": "preparing", "targets": []}
     try:
         for index, (source, target) in enumerate(items):
@@ -59,7 +66,15 @@ def atomic_promote(
             elif not target.exists():
                 raise PromotionError(f"削除対象が存在しません: {target}")
             original = originals / str(index) if target.exists() else None
-            prepared.append((incoming, target, original))
+            adjacent_original = None
+            if original is not None and target.suffix == ".app":
+                # provenance付きappを別directoryへrenameするとmacOSで停止しうる。
+                # backupはcopyで確保し、切替renameは同じdirectory内だけにする。
+                _copy(target, original)
+                adjacent_original = target.parent / f".{target.name}.upgrade-old"
+                if adjacent_original.exists() or adjacent_original.is_symlink():
+                    raise PromotionError(f"stale app backupがあります: {adjacent_original}")
+            prepared.append((incoming, target, original, adjacent_original))
             report["targets"].append(
                 {
                     "target": str(target),
@@ -70,33 +85,50 @@ def atomic_promote(
 
         report["result"] = "switching"
         write_json(backup_root / "promotion.json", report)
-        applied: list[tuple[Path, Path | None]] = []
-        for incoming, target, original in prepared:
+        applied: list[tuple[Path, Path | None, Path | None]] = []
+        for incoming, target, original, adjacent_original in prepared:
             if original is not None:
-                os.replace(target, original)
+                os.replace(target, adjacent_original or original)
             if incoming is not None:
                 try:
                     os.replace(incoming, target)
                 except Exception:
-                    if original is not None and original.exists():
-                        os.replace(original, target)
+                    restore = adjacent_original or original
+                    if restore is not None and restore.exists():
+                        os.replace(restore, target)
                     raise
-            applied.append((target, original))
+            applied.append((target, original, adjacent_original))
 
         verify()
+        for _target, _original, adjacent_original in applied:
+            if adjacent_original is not None and adjacent_original.exists():
+                _remove(adjacent_original)
         report["result"] = "promoted-and-verified"
         write_json(backup_root / "promotion.json", report)
     except Exception as error:
-        for index, (target, original) in reversed(
+        for index, (target, original, adjacent_original) in reversed(
             list(enumerate(locals().get("applied", [])))
         ):
             if target.exists() and not target.is_symlink():
-                os.replace(target, failed / str(index))
-            if original is not None and original.exists():
-                os.replace(original, target)
-        for index, (incoming, _target, _original) in enumerate(prepared):
+                if target.suffix == ".app":
+                    _copy(target, failed / str(index))
+                    _remove(target)
+                else:
+                    os.replace(target, failed / str(index))
+            if adjacent_original is not None and adjacent_original.exists():
+                os.replace(adjacent_original, target)
+            elif original is not None and original.exists():
+                if target.suffix == ".app":
+                    _copy(original, target)
+                else:
+                    os.replace(original, target)
+        for index, (incoming, target, _original, _adjacent_original) in enumerate(prepared):
             if incoming is not None and (incoming.exists() or incoming.is_symlink()):
-                os.replace(incoming, failed / f"prepared-{index}")
+                if target.suffix == ".app":
+                    _copy(incoming, failed / f"prepared-{index}")
+                    _remove(incoming)
+                else:
+                    os.replace(incoming, failed / f"prepared-{index}")
         report["result"] = "failed-auto-rolled-back"
         report["error"] = f"{type(error).__name__}: {error}"
         write_json(backup_root / "promotion.json", report)

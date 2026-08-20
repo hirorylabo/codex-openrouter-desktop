@@ -343,7 +343,7 @@ class Supervisor:
             raise AppError(f"公式ChatGPT.appが見つかりません: {self.paths.stock_app}")
         arguments = [str(executable)]
         if self.workspace is not None:
-            arguments.append(str(self.workspace))
+            arguments.extend(("--open-project", str(self.workspace)))
         environment = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
         return subprocess.Popen(
             arguments,

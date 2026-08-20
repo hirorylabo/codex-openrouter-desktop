@@ -289,7 +289,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         alert.messageText = "\(entry.displayName) はCodex tool互換が不完全です"
         alert.informativeText =
             "状態: \(entry.toolSupport ?? "unknown")\n"
-            + "exec・browser・search・apply_patchが動かない可能性があります。\n\n"
+            + "exec・apply_patchなどのdirect toolが動かない可能性があります。\n\n"
             + (entry.toolSupportReason ?? "互換性の根拠はありません。")
         alert.addButton(withTitle: "リスクを承認して追加")
         alert.addButton(withTitle: "やめる")
@@ -416,7 +416,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         }
         if !risky.isEmpty {
             return "Codex tool互換が不完全なモデルを\(risky.count)件選んでいます。"
-                + "exec・browser・search・apply_patchが動かない可能性があります。"
+                + "exec・apply_patchなどのdirect toolが動かない可能性があります。"
         }
         return ""
     }
@@ -502,7 +502,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
             alert.informativeText = risky.map {
                 "\($0.id): \($0.toolSupport) — \($0.toolSupportReason)"
             }.joined(separator: "\n")
-                + "\n\nexec・browser・search・apply_patchが動かない可能性があります。"
+                + "\n\nexec・apply_patchなどのdirect toolが動かない可能性があります。"
             alert.addButton(withTitle: "リスクを承認して保存")
             alert.addButton(withTitle: "保存しない")
             alert.beginSheetModal(for: window) { [weak self] response in
