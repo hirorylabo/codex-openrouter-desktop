@@ -286,6 +286,25 @@ class RepositoryTests(unittest.TestCase):
         ]
         self.assertEqual(["main.swift"], top_level)
 
+    def test_ci_parses_every_zsh_entry_point(self) -> None:
+        """CIがrepo内の全zsh scriptを構文検査すること。
+
+        `zsh -n` の対象をfile名で列挙しているため、scriptが増えても黙って漏れる。
+        実際 `scripts/macos_installed_e2e.zsh` は列挙から漏れており、zsh固有の
+        read-only parameter衝突はCIでは止まらなかった。
+        """
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        parsed = set(re.findall(r"zsh -n (\S+)", workflow))
+        excluded = {".git", ".generated", "dist", "node_modules", ".test-output", "__pycache__"}
+        present = {
+            str(path.relative_to(ROOT))
+            for pattern in ("*.zsh", "*.zsh.in")
+            for path in ROOT.glob(f"**/{pattern}")
+            if not excluded & set(path.relative_to(ROOT).parts)
+        }
+        self.assertTrue(present)
+        self.assertEqual(set(), present - parsed)
+
     def test_launcher_is_a_regular_app_with_a_settings_entry(self) -> None:
         """管理ランチャーはDockとAppメニューを持つ通常app。常駐daemonにはしない。"""
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")

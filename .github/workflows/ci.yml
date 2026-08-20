@@ -83,6 +83,7 @@ jobs:
         run: |
           zsh -n portable/templates/codex-openrouter-app.zsh.in
           zsh -n portable/launcher/build_icon.zsh
+          zsh -n scripts/macos_installed_e2e.zsh
       - name: Synthetic upgrade, promotion, and rollback E2E
         run: PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
 
