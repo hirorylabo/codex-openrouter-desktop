@@ -328,17 +328,28 @@ class ExclusionTests(SupervisorTestCase):
 
 
 class LaunchTests(SupervisorTestCase):
-    def test_launch_uses_explicit_project_flag_and_never_passes_real_key(self):
+    BUNDLE_IDENTIFIER = "com.example.stock-chat"
+
+    def stock_executable(self):
+        """純正app相当の最小構成。bundle idはInfo.plistから読ませる。"""
         executable = self.paths.stock_app / "Contents/MacOS/ChatGPT"
         executable.parent.mkdir(parents=True)
         executable.touch()
+        (self.paths.stock_app / "Contents/Info.plist").write_bytes(
+            sup.plistlib.dumps({"CFBundleIdentifier": self.BUNDLE_IDENTIFIER})
+        )
+        return executable
+
+    def test_launch_uses_explicit_project_flag_and_never_passes_real_key(self):
+        executable = self.stock_executable()
         self.supervisor.workspace = self.root / "workspace"
 
         with mock.patch.dict(
             sup.os.environ,
             {"OPENROUTER_API_KEY": "must-not-leak", "SAFE_VALUE": "kept"},
             clear=True,
-        ), mock.patch.object(sup.subprocess, "Popen", return_value=object()) as popen:
+        ), mock.patch.object(sup.subprocess, "Popen", return_value=object()) as popen, \
+             mock.patch.object(self.supervisor, "deliver_workspace"):
             self.supervisor.launch()
 
         arguments = popen.call_args.args[0]
@@ -349,6 +360,70 @@ class LaunchTests(SupervisorTestCase):
         )
         self.assertNotIn("OPENROUTER_API_KEY", environment)
         self.assertEqual(environment["SAFE_VALUE"], "kept")
+
+
+class WorkspaceDeliveryTests(LaunchTests):
+    """`--open-project` はbuild 6849で無視される。open document経路でも必ず渡す。"""
+
+    def run_delivery(self, returncodes, pids=(4321,)):
+        self.stock_executable()
+        completed = [mock.Mock(returncode=code) for code in returncodes]
+        with mock.patch.object(sup, "process_pids", return_value=list(pids)), \
+             mock.patch.object(sup.time, "sleep"), \
+             mock.patch.object(sup.subprocess, "run", side_effect=completed) as run:
+            self.supervisor.deliver_workspace()
+        return run
+
+    def test_workspace_is_delivered_through_the_open_document_path(self):
+        workspace = self.root / "workspace"
+        self.supervisor.workspace = workspace
+        run = self.run_delivery([0])
+        self.assertEqual(
+            ["/usr/bin/open", "-b", self.BUNDLE_IDENTIFIER, str(workspace)],
+            run.call_args.args[0],
+        )
+        self.assertEqual(1, run.call_count)
+
+    def test_no_workspace_sends_nothing(self):
+        self.supervisor.workspace = None
+        self.stock_executable()
+        with mock.patch.object(sup.subprocess, "run") as run:
+            self.supervisor.deliver_workspace()
+        run.assert_not_called()
+
+    def test_delivery_retries_and_then_fails_closed(self):
+        self.supervisor.workspace = self.root / "workspace"
+        self.stock_executable()
+        with mock.patch.object(sup, "process_pids", return_value=[4321]), \
+             mock.patch.object(sup.time, "sleep"), \
+             mock.patch.object(sup.time, "monotonic", side_effect=[0.0, 0.0, 1.0, 999.0]), \
+             mock.patch.object(sup.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+             self.assertRaises(sup.SupervisorError):
+            self.supervisor.deliver_workspace()
+
+    def test_launch_stops_the_app_when_the_workspace_cannot_be_delivered(self):
+        self.stock_executable()
+        self.supervisor.workspace = self.root / "workspace"
+        process = mock.Mock()
+        with mock.patch.object(sup.subprocess, "Popen", return_value=process), \
+             mock.patch.object(
+                 self.supervisor, "deliver_workspace", side_effect=sup.SupervisorError("boom")
+             ), \
+             self.assertRaises(sup.SupervisorError):
+            self.supervisor.launch()
+        process.terminate.assert_called_once_with()
+
+    def test_bundle_identifier_comes_from_the_stock_app_plist(self):
+        self.stock_executable()
+        self.assertEqual(
+            self.BUNDLE_IDENTIFIER, sup.stock_bundle_identifier(self.paths.stock_app)
+        )
+
+    def test_missing_bundle_identifier_is_rejected(self):
+        self.stock_executable()
+        (self.paths.stock_app / "Contents/Info.plist").write_bytes(sup.plistlib.dumps({}))
+        with self.assertRaises(sup.SupervisorError):
+            sup.stock_bundle_identifier(self.paths.stock_app)
 
 
 class ProviderBlockTests(unittest.TestCase):

@@ -17,10 +17,12 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import plistlib
 import secrets
 import signal
 import subprocess
 import threading
+import time
 
 from . import (
     catalog,
@@ -38,12 +40,26 @@ from .profile import ResolvedProfile, active_registry, installed_profile
 
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
+# 起動直後のappがopen document eventを受け取れるまで待つ上限。無限には待たない。
+WORKSPACE_DELIVERY_SECONDS = 30
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
 STATE_SCHEMA_VERSION = 4
 
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def stock_bundle_identifier(stock_app: Path) -> str:
+    """純正appのbundle id。値をハードコードせずInfo.plistから読む。"""
+    try:
+        document = plistlib.loads((stock_app / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise SupervisorError(f"公式ChatGPT.appのInfo.plistを読めません: {stock_app}") from exc
+    identifier = document.get("CFBundleIdentifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise SupervisorError(f"公式ChatGPT.appのbundle idを取得できません: {stock_app}")
+    return identifier
 
 
 @dataclass
@@ -353,13 +369,52 @@ class Supervisor:
         if self.workspace is not None:
             arguments.extend(("--open-project", str(self.workspace)))
         environment = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
-        return subprocess.Popen(
+        process = subprocess.Popen(
             arguments,
             env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=False,
         )
+        try:
+            self.deliver_workspace()
+        except Exception:
+            # workspaceが届かないまま続けると、利用者から見て「dropしたfolderと
+            # 違うprojectが開く」だけになる。黙って劣化させず、起動ごと止める。
+            process.terminate()
+            raise
+        return process
+
+    def deliver_workspace(self) -> None:
+        """workspaceをLaunchServicesのopen document経路でも届ける。
+
+        ChatGPT build 6849 は起動引数の `--open-project` を無視し、直前に開いて
+        いたprojectを復元する。同じbuildでもopen document経路は効くため、起動後に
+        改めて渡す。古いbuildでは引数側が効くので、そちらも従来どおり残している。
+        """
+        if self.workspace is None:
+            return
+        executable = self.paths.stock_app / "Contents/MacOS/ChatGPT"
+        identifier = stock_bundle_identifier(self.paths.stock_app)
+        deadline = time.monotonic() + WORKSPACE_DELIVERY_SECONDS
+        # processとして見える前にopenを投げると、LaunchServicesが2つ目のinstanceを
+        # 起こしうる。起動を確認してから送る。
+        while not process_pids(executable):
+            if time.monotonic() >= deadline:
+                raise SupervisorError("純正appの起動を確認できず、workspaceを渡せませんでした")
+            time.sleep(0.5)
+        while True:
+            result = subprocess.run(
+                ["/usr/bin/open", "-b", identifier, str(self.workspace)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            if time.monotonic() >= deadline:
+                raise SupervisorError(f"workspaceを純正appへ渡せませんでした: {self.workspace}")
+            time.sleep(1)
 
     # [8] 後始末 ------------------------------------------------------------
     def cleanup(self) -> list[str]:

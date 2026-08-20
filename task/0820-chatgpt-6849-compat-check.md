@@ -4,7 +4,7 @@
 
 対象branch: `codex/openrouter-tool-bridge`（PR #24）
 
-Status: **pin昇格とtest更新は完了。ただし 6849 で `--open-project` が効かなくなっており、実機5-gate E2Eは開始できない。**
+Status: **pin昇格・workspace受け渡しの修復まで完了。実機5-gate E2Eでの確認待ち。**
 
 ## Context
 
@@ -82,8 +82,14 @@ pathがtemp配下だから、appが知らないfolderだから、という条件
 `src/codex_openrouter/supervisor.py` の `--open-project` に依存しているため、
 **6849では利用者がdropしたfolderがChatGPTへ届かない**。
 
-`app.asar` を `open-project` / `openFolder` などで検索したが、置き換えとなるCLI契約は
-特定できていない。README記載のとおり `--open-project` は内部契約であり、公開APIではない。
+### 効く経路: LaunchServiceのopen document
+
+`open -b <ChatGPTのbundle id> <folder>` は同じbuild 6849でもprojectを切り替える。
+実測では、送った直後にsidebarの先頭が渡したfolderに変わり「チャットはありません」になった。
+壊れているのは起動引数の `--open-project` だけで、document open経路は生きている。
+
+`ファイル` menuにも `フォルダーを開く` があるが、これはmodalのfolder pickerで、
+自動化にも利用者の手順にも向かない。
 
 ### 副次的に判明したこと
 
@@ -103,8 +109,20 @@ pathがtemp配下だから、appが知らないfolderだから、という条件
 | `tests/fixtures/codex-tool-wire-6849.json` | 追加。契約に差分が見つからないため、shapeは6720と同一で `build` / `chatgpt_version` だけ更新 |
 | `tests/fixtures/codex-tool-wire-6662.json` | 削除（参照がなくなるため） |
 | `tests/test_toolbridge.py` | 既定fixtureと「最新+直前」の組を `("6849", "6720")` へ |
+| `src/codex_openrouter/supervisor.py` | 起動後に `open -b <bundle id> <workspace>` でworkspaceを届ける。`--open-project` は古いbuildで有効なので残す |
+| `tests/test_supervisor.py` | 上記のtest（exact引数・未指定時は送らない・retry後のfail-closed・bundle idはInfo.plistから） |
 
-`src/` は変更していない。中和すべき新フィールドが無いため。
+catalog中和は不要だった（新フィールドが無いため）。`supervisor.py` の変更は
+tool契約ではなく、6849で壊れたworkspace受け渡しの修復である。
+
+### workspace受け渡しの実装
+
+- bundle idは値をハードコードせず `Contents/Info.plist` の `CFBundleIdentifier` から読む。
+- appがprocessとして見える前にopenを投げるとLaunchServicesが2つ目のinstanceを
+  起こしうるため、起動を確認してから送る。
+- 上限 `WORKSPACE_DELIVERY_SECONDS` まで再試行し、届かなければ起動ごと止める。
+  workspaceが届かないまま続けると、利用者から見て「dropしたfolderと違うprojectが
+  開く」だけになるため、黙って劣化させない。
 
 ## 未決（実機gateの結果で決める）
 
@@ -116,7 +134,7 @@ gate 5（parallel turn）の挙動を見てから判断する。
 ## Verification
 
 ```bash
-PYTHONPATH=src python3 scripts/run_unit_tests.py      # 363 tests PASS
+PYTHONPATH=src python3 scripts/run_unit_tests.py      # 370 tests PASS
 uvx ruff@0.16.3 check .                                # PASS
 ```
 
