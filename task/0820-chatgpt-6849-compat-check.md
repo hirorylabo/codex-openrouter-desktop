@@ -4,7 +4,7 @@
 
 対象branch: `codex/openrouter-tool-bridge`（PR #24）
 
-Status: **pin昇格とtest更新まで完了。実機5-gate E2Eでの確認待ち。**
+Status: **pin昇格とtest更新は完了。ただし 6849 で `--open-project` が効かなくなっており、実機5-gate E2Eは開始できない。**
 
 ## Context
 
@@ -60,6 +60,38 @@ OpenRouterへ送る。ChatGPT buildはcache keyにしか使われず、request�
 `state/tool-compatibility.json` には build 6849 / `partial` のcacheが残っている。
 成功するまで回して`verified`に上書きするのは証拠の捏造なので行わない。UIの
 tool状態表示が `partial` になるだけで、launcherの起動経路はこれで塞がらない。
+
+## 実機で見つかった回帰: `--open-project` が効かない
+
+**build 6849では、`--open-project <path>` を渡してもChatGPTが別のprojectを開く。**
+直前に使っていたprojectが復元され、渡したpathは無視される。
+
+確認手順と結果:
+
+| 確認 | 結果 |
+| --- | --- |
+| `ps -o args=` | `ChatGPT --open-project /private/tmp/codex-openrouter-e2e.RUN1` が確かに渡っている |
+| 画面 | sidebarとcomposerのchipは直前に使っていた別projectのまま |
+| gate 1のsession | `session_meta.cwd` が 利用者が直前に開いていた別project になり、auditorがfail-closedで拒否 |
+| 既知pathでの追試 | supervisorを止めた素の状態で `--open-project <このrepoのpath>` を渡しても、開くのは同じ別project |
+
+pathがtemp配下だから、appが知らないfolderだから、という条件依存ではない。
+**渡したprojectを開かない**という一律の挙動である。
+
+影響は実機E2Eだけではない。launcherのworkspace受け渡し（folder drop / Open With）は
+`src/codex_openrouter/supervisor.py` の `--open-project` に依存しているため、
+**6849では利用者がdropしたfolderがChatGPTへ届かない**。
+
+`app.asar` を `open-project` / `openFolder` などで検索したが、置き換えとなるCLI契約は
+特定できていない。README記載のとおり `--open-project` は内部契約であり、公開APIではない。
+
+### 副次的に判明したこと
+
+- 実機のguard logに残った今回のforwarded 2件には `tool_request` / `duration_ms` /
+  token数が付いていない。`tool_map.has_tools` が偽だったことになる。tool宣言の
+  渡り方が変わった可能性があるが、workspace側で止まっているため未確認。
+- macOSの入力ソースが日本語IMEのとき、System Eventsの
+  `keystroke "a" using command down` が「あ」に化ける。GUI駆動では `key code` を使う。
 
 ## 変更詳細
 
