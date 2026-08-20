@@ -37,6 +37,9 @@ runtime-*.png
 list_window
 CodexOpenRouterLauncher
 
+# Local Claude Code settings: 個人設定なので追跡しない
+.claude/settings.local.json
+
 # Installer test output
 portable/.generated/
 portable/.test-output/

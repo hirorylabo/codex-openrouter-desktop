@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from codex_openrouter import toolbridge  # noqa: E402
 
 
-def fixture(build: str = "6720") -> dict:
+def fixture(build: str = "6849") -> dict:
     return json.loads(
         (ROOT / f"tests/fixtures/codex-tool-wire-{build}.json").read_text(
             encoding="utf-8"
@@ -19,7 +19,7 @@ def fixture(build: str = "6720") -> dict:
     )
 
 
-def request(build: str = "6720") -> dict:
+def request(build: str = "6849") -> dict:
     return {
         "model": "example/model",
         "input": "Use a tool.",
@@ -34,7 +34,7 @@ def event(document: dict) -> bytes:
 
 class RequestBridgeTests(unittest.TestCase):
     def test_latest_and_previous_fixtures_use_the_pinned_contract(self) -> None:
-        for build in ("6720", "6662"):
+        for build in ("6849", "6720"):
             with self.subTest(build=build):
                 document = fixture(build)
                 self.assertEqual(1, document["schema_version"])
@@ -466,7 +466,7 @@ class UsageTelemetryTests(unittest.TestCase):
 class BuildAllowlistTests(unittest.TestCase):
     def test_build_allowlist_is_exactly_latest_and_previous(self) -> None:
         path = ROOT / "models/tool-wire-builds.json"
-        self.assertEqual(("6720", "6662"), toolbridge.supported_builds(path))
+        self.assertEqual(("6849", "6720"), toolbridge.supported_builds(path))
         toolbridge.assert_supported_build(path, "6720")
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.assert_supported_build(path, "7000")

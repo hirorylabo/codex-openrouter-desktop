@@ -47,6 +47,11 @@ structured/custom/namespace/apply_patchの実機canaryを行います。合格�
 
 ### 更新記録
 
+- 2026-08-20: ChatGPT.appが build `6720` → `6849`（`26.818.21641`）へ更新されたため、
+  `models/tool-wire-builds.json` を `6849` + 直前の `6720` へ昇格した。テンプレート差分は
+  `supports_parallel_tool_calls` の削除と `model_messages.multi_agent`（値は `null`）の追加だけで、
+  中和が要る新フィールドは無い。経緯と実測は `task/0820-chatgpt-6849-compat-check.md`。
+
 - 2026-08-20: OpenAI Codexのpinを`fcdf2b501412d85efa3ce6bc217b8b51d7ed792a`へ更新。
   直前pinからの1 commitは`unified_exec/head_tail_buffer`の容量型変更だけで、参照する
   tool spec / apply_patch handlerのhashは不変だったため、tool wire fixtureは再生成していない。
