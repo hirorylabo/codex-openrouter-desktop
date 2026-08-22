@@ -167,7 +167,9 @@ class AllowlistTests(GuardTestCase):
             {
                 "model": "z-ai/glm-5.2",
                 "input": "x",
-                "tools": [{"type": "web_search"}],
+                # web_search型はserver toolへ翻訳されるため拒否されない。
+                # 拒否対象は未知型。codex 0.148.0の型集合の外側を出す。
+                "tools": [{"type": "local_shell"}],
             }
         )
         self.assertEqual(400, status)

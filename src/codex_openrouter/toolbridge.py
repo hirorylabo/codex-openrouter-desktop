@@ -26,6 +26,17 @@ NAMESPACE_DELIMITER = "__"
 # bridgeも同じ名前を使う。task/0822-toolbridge-fix-plan.md
 CUSTOM_INPUT_FIELD = "content"
 
+# codexが送るnative web_search型をOpenRouterのserver-side検索へ翻訳する。
+# codex 0.148.0はcatalogのsupports_search_tool=Falseでもweb_search型を送ってくる
+# （build 6849実測、tools[23]中1件）。OpenRouterはこの型をstatus 200で黙って捨てる
+# ので、素通しは「動いたように見えて動かない」。代わりにserver toolを足すと、
+# modelが自発的に検索を実行する（2026-08-22実測: 単独・function併用・streaming
+# の3形態で成功、codexと同じ/v1/responses wire）。codexへの応答からは
+# openrouter:web_search itemを取り除く。codexは未知の出力型を処理できないため。
+CODEX_WEB_SEARCH_TYPE = "web_search"
+OPENROUTER_WEB_SEARCH_TOOL: dict[str, Any] = {"type": "openrouter:web_search"}
+OPENROUTER_WEB_SEARCH_ITEM_TYPE = "openrouter:web_search"
+
 
 class ToolBridgeError(RuntimeError):
     """変換不能または不正なtool wire。呼び出しを実行させず停止する。"""
@@ -291,6 +302,7 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
     original: dict[tuple[str | None, str], str] = {}
     output: list[dict[str, Any]] = []
     namespaces: set[str] = set()
+    wants_web_search = False
 
     # 通常function名を先に予約する。生成名との衝突をtool順に依存させない。
     for tool in tools:
@@ -304,6 +316,11 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
 
     def add(tool: dict[str, Any], namespace: str | None) -> None:
         kind = tool.get("type")
+        if kind == CODEX_WEB_SEARCH_TYPE and namespace is None:
+            # codexのnative web_search型。OpenRouterのserver toolへ翻訳する。
+            nonlocal wants_web_search
+            wants_web_search = True
+            return
         if kind not in {"function", "custom"}:
             raise ToolBridgeError(f"未対応のCodex tool型です: {kind!r}")
         name = _name(tool.get("name"), "tool")
@@ -344,6 +361,11 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
             if not isinstance(child, dict):
                 raise ToolBridgeError(f"namespace {namespace} のchildがobjectではありません")
             add(child, namespace)
+
+    # codexのweb_search型はOpenRouterのserver-side検索へ翻訳済み。
+    # server tool定義自体は名前を持たないのでused/identitiesに載せない。
+    if wants_web_search:
+        output.append(deepcopy(OPENROUTER_WEB_SEARCH_TOOL))
 
     tool_map = ToolMap(transformed, original, frozenset(passthrough))
     # 元の置き場所へ戻す。lite形式にtop-level `tools` を新設すると、
@@ -530,8 +552,12 @@ def transform_response_document(
     output = result.get("output")
     if isinstance(output, list):
         result["output"] = [
-            transform_output_item(item, tool_map) if isinstance(item, dict) else item
+            transformed
             for item in output
+            if not (isinstance(item, dict) and item.get("type") == OPENROUTER_WEB_SEARCH_ITEM_TYPE)
+            # server-side web searchの結果itemはcodex未知の型。codexへは
+            # 検索結果を織り込んだmessageだけを見せる。
+            for transformed in [transform_output_item(item, tool_map) if isinstance(item, dict) else item]
         ]
     return result, summary
 
@@ -612,13 +638,25 @@ class SSEBridge:
             self.usage = usage
         kind = event.get("type")
         if kind == "response.output_item.added":
-            return [self._added(event)]
+            added = self._added(event)
+            return [] if added is None else [added]
         if kind == "response.function_call_arguments.delta":
             return self._arguments_delta(event)
         if kind == "response.function_call_arguments.done":
             return self._arguments_done(event)
         if kind == "response.output_item.done":
-            return [self._output_done(event)]
+            done = self._output_done(event)
+            return [] if done is None else [done]
+        if kind in {
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+        }:
+            # server-side web searchの進行event。codex 0.148.0は
+            # `web_search_call` 型を知っているが、idがOpenRouterの `st_tmp_*`
+            # でitem lifecycleがcodexの期待と異なるため、素通しせず落とす。
+            # 検索の経過はmodelのreasoning/messageとして届くので情報は失われない。
+            return []
         if kind == "response.completed":
             result = deepcopy(event)
             response = result.get("response")
@@ -633,10 +671,16 @@ class SSEBridge:
                 raise ToolBridgeError("tool callの途中でSSEが失敗または不完全になりました")
         return [event]
 
-    def _added(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _added(self, event: dict[str, Any]) -> dict[str, Any] | None:
         result = deepcopy(event)
         item = result.get("item")
         if not isinstance(item, dict) or item.get("type") != "function_call":
+            if (
+                isinstance(item, dict)
+                and item.get("type") == OPENROUTER_WEB_SEARCH_ITEM_TYPE
+            ):
+                # server-side web searchの結果item。codexへは見せない。
+                return None
             return result
         item_id = _name(item.get("id") or result.get("item_id"), "function call item")
         if item_id in self.calls:
@@ -715,10 +759,15 @@ class SSEBridge:
         done["input"] = raw
         return [delta, done]
 
-    def _output_done(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _output_done(self, event: dict[str, Any]) -> dict[str, Any] | None:
         result = deepcopy(event)
         item = result.get("item")
-        if not isinstance(item, dict) or item.get("type") != "function_call":
+        if not isinstance(item, dict):
+            return result
+        if item.get("type") == OPENROUTER_WEB_SEARCH_ITEM_TYPE:
+            # server-side web searchの結果item。codexへは見せない。
+            return None
+        if item.get("type") != "function_call":
             return result
         item_id = _name(item.get("id") or result.get("item_id"), "function call item")
         state = self.calls.get(item_id)

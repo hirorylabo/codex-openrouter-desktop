@@ -103,7 +103,10 @@ class RequestBridgeTests(unittest.TestCase):
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.prepare_document(collision)
         unsupported = request()
-        unsupported["tools"] = [{"type": "web_search"}]
+        # web_search型はOpenRouterのserver toolへ翻訳されるようになったので、
+        # 拒否対象は未知の型のまま。codex 0.148.0が持つ型集合
+        # (function/local_shell/namespace/web_search)の外側を出す。
+        unsupported["tools"] = [{"type": "local_shell"}]
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.prepare_document(unsupported)
 
@@ -111,6 +114,126 @@ class RequestBridgeTests(unittest.TestCase):
         duplicate_namespace["tools"].append(duplicate_namespace["tools"][-1])
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.prepare_document(duplicate_namespace)
+
+
+class WebSearchTranslationTests(unittest.TestCase):
+    """codexのweb_search型 → OpenRouter server tool 翻訳。
+
+    2026-08-22実測: build 6849のcodex execはtools[23]に
+    `{"type":"web_search","external_web_access":false,...}` を含め、
+    bridgeがfail-closedしてgate 1が落ちていた。OpenRouterはこの型を
+    status 200で黙って捨てるため、素通しは「動いたように見えて動かない」。
+    `{"type":"openrouter:web_search"}` への置換は3形態で実測成功。
+    """
+
+    def setUp(self) -> None:
+        self.document = request()
+        self.document["tools"].append(
+            {"type": "web_search", "external_web_access": False}
+        )
+
+    def test_request_translates_web_search_to_server_tool(self) -> None:
+        prepared = toolbridge.prepare_document(self.document)
+        tools = prepared.document["tools"]
+        self.assertNotIn(
+            toolbridge.CODEX_WEB_SEARCH_TYPE, [tool.get("type") for tool in tools]
+        )
+        server_tools = [
+            tool
+            for tool in tools
+            if tool.get("type") == toolbridge.OPENROUTER_WEB_SEARCH_ITEM_TYPE
+        ]
+        self.assertEqual(1, len(server_tools))
+
+    def test_duplicate_web_search_definitions_collapse_to_one(self) -> None:
+        self.document["tools"].append({"type": "web_search"})
+        prepared = toolbridge.prepare_document(self.document)
+        server_tools = [
+            tool
+            for tool in prepared.document["tools"]
+            if tool.get("type") == toolbridge.OPENROUTER_WEB_SEARCH_ITEM_TYPE
+        ]
+        self.assertEqual(1, len(server_tools))
+
+    def test_response_document_drops_server_tool_items(self) -> None:
+        prepared = toolbridge.prepare_document(self.document)
+        document = {
+            "output": [
+                {
+                    "type": toolbridge.OPENROUTER_WEB_SEARCH_ITEM_TYPE,
+                    "id": "st_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "test"},
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+            ]
+        }
+        restored, _summary = toolbridge.transform_response_document(
+            document, prepared.tool_map
+        )
+        self.assertEqual(
+            ["message"], [item["type"] for item in restored["output"]]
+        )
+
+    def test_sse_drops_server_tool_items_and_progress_events(self) -> None:
+        prepared = toolbridge.prepare_document(self.document)
+        search_type = toolbridge.OPENROUTER_WEB_SEARCH_ITEM_TYPE
+        documents = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": search_type, "id": "st_1", "status": "in_progress"},
+            },
+            {
+                "type": "response.web_search_call.in_progress",
+                "item_id": "st_1",
+                "output_index": 0,
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": search_type,
+                    "id": "st_1",
+                    "status": "completed",
+                },
+            },
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Python 3.14.7"}
+                    ],
+                },
+            },
+            {"type": "response.completed", "response": {"output": []}},
+        ]
+        raw = b"".join(event(item) for item in documents) + b"data: [DONE]\n\n"
+        bridge = toolbridge.SSEBridge(prepared.tool_map)
+        output: list[bytes] = []
+        for offset in range(0, len(raw), 13):
+            output.extend(bridge.feed(raw[offset : offset + 13]))
+        output.extend(bridge.finish())
+        text = b"".join(output).decode()
+        self.assertNotIn(search_type, text)
+        self.assertNotIn("web_search_call.in_progress", text)
+        self.assertIn("Python 3.14.7", text)
 
 
 class WireContractRegressionTests(unittest.TestCase):
