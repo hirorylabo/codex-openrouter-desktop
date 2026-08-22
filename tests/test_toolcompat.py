@@ -76,7 +76,9 @@ class VerificationTests(unittest.TestCase):
             [body["tools"][0]["parameters"]["required"] for body in requests],
             [["value"], ["content"]],
         )
-        self.assertTrue(all(body["provider"] == {"zdr": True} for body in requests))
+        self.assertTrue(
+            all(body["provider"] == {"zdr": True, "sort": "price"} for body in requests)
+        )
         self.assertNotIn("sk-or-", self.path.read_text(encoding="utf-8"))
 
     def test_structured_success_and_freeform_failure_is_partial(self) -> None:
@@ -96,7 +98,22 @@ class VerificationTests(unittest.TestCase):
             return 400, {"error": "tools unsupported"}
 
         self.assertEqual(self.verify(requester)[0]["tool_support"], "unsupported")
-        self.assertEqual(1, requests)
+        # 短絡しないので freeform も試す（2リクエスト）
+        self.assertEqual(2, requests)
+
+    def test_structured_failure_still_probes_freeform(self) -> None:
+        """provider抽選でstructuredが外れてもfreeformは健全かもしれない。
+
+        短絡すると「1回の外れ = unsupported」になるので、常に両方測る。
+        structured失敗 + freeform成功は partial(structured非互換)。
+        """
+
+        def requester(body, key):
+            if body["tools"][0]["name"] == "codex_structured_probe":
+                return 400, {"error": "tools unsupported"}
+            return success(body, key)
+
+        self.assertEqual(self.verify(requester)[0]["tool_support"], "partial")
 
     def test_non_zdr_canary_does_not_claim_provider_zdr(self) -> None:
         requests: list[dict] = []

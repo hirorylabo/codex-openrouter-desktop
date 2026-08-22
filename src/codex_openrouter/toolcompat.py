@@ -233,7 +233,10 @@ def _body(model: str, spec: dict[str, Any], *, freeform: bool) -> dict[str, Any]
         "max_output_tokens": 64,
     }
     if spec.get("zdr_supported", True):
-        body["provider"] = {"zdr": True}
+        # provider抽選ノイズを消す。endpointが毎回変わると structured_outputs
+        # 公称の有無で canary が揺れる（0822-toolbridge-fix-plan.md 実測 3/4）。
+        # zdr との併用は 2026-08-22 に OpenRouter 実測済み（status 200 / PING着弾）。
+        body["provider"] = {"zdr": True, "sort": "price"}
     return body
 
 
@@ -331,10 +334,12 @@ def verify_models(
                 structured, structured_summary = _probe(
                     model, spec, key, freeform=False, requester=requester
                 )
-                freeform, freeform_summary = (
-                    _probe(model, spec, key, freeform=True, requester=requester)
-                    if structured
-                    else (False, None)
+                # 短絡しない。provider抽選でstructuredが外れてもfreeformは
+                # 健全かもしれないので、常に両方測る（コストは+1リクエスト/回）。
+                # structured & freeform → verified / structuredのみ → partial /
+                # freeformのみ → partial / 両方失敗 → unsupported
+                freeform, freeform_summary = _probe(
+                    model, spec, key, freeform=True, requester=requester
                 )
                 if structured and freeform:
                     status = "verified"
@@ -342,6 +347,9 @@ def verify_models(
                 elif structured:
                     status = "partial"
                     reason = "structured functionは成功、freeform toolは非互換"
+                elif freeform:
+                    status = "partial"
+                    reason = "freeform toolは成功、structured functionは非互換"
                 else:
                     status = "unsupported"
                     reason = "Codex direct structured function callを実測できません"
