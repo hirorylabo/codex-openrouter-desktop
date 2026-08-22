@@ -37,6 +37,11 @@ NATIVE_ONLY_FIELDS: dict[str, Any] = {
     "node_repl_auto_review_required": False,
     # GPT-5.6向けCode Modeを継承しない。router modelはdirect tool callだけを公開する。
     "node_repl_disabled": True,
+    # `true` を継ぐとcodexはresponses-lite形式で送り、tool定義がtop-levelの
+    # `tools` ではなく `input[0].additional_tools` に載る。toolbridgeは両形式を
+    # 扱えるが（`_tool_group`）、classic形式のほうが実測量が多いので既知の
+    # 経路へ寄せる。実機gate 2が落ちた原因の1つがこの継承だった。
+    "use_responses_lite": False,
 }
 
 DIRECT_TOOL_FIELDS: dict[str, Any] = {

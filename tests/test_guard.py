@@ -150,7 +150,9 @@ class AllowlistTests(GuardTestCase):
         forwarded, _key, metadata_enabled = self.forwarder.calls[0]
         tool = json.loads(forwarded)["tools"][0]
         self.assertEqual("function", tool["type"])
-        self.assertEqual(["patch"], tool["parameters"]["required"])
+        self.assertEqual("apply_patch", tool["name"])
+        self.assertEqual(["content"], tool["parameters"]["required"])
+        self.assertNotIn("strict", tool)
         self.assertTrue(metadata_enabled)
         self.assertNotIn(b"openrouter_metadata", payload)
         record = self.log_records()[0]

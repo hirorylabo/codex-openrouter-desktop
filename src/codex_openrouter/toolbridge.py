@@ -13,8 +13,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-TOOL_CONTRACT_VERSION = 2
-TRANSFORMED_PREFIX = "codex_bridge_"
+# wire を変えたら上げる。toolcompat の cache 判定にも使われるので、
+# 古い契約下で測った結果（build 6849 の "freeform非互換"）が自動で失効する。
+TOOL_CONTRACT_VERSION = 3
+
+# namespace配下のtoolを平坦化するときの区切り。元の意味を保ったまま
+# top-levelとの衝突を避ける。Codex appが自前のnamespace toolに使う形と同じ。
+NAMESPACE_DELIMITER = "__"
+
+# custom toolをfunctionへ落とすときの唯一の引数名。
+# 2026-08-22の実測: `content` で 4/4、`patch` で 3/4。LiteLLMのCodex向け
+# bridgeも同じ名前を使う。task/0822-toolbridge-fix-plan.md
+CUSTOM_INPUT_FIELD = "content"
 
 
 class ToolBridgeError(RuntimeError):
@@ -45,8 +55,6 @@ class ToolMap:
         target = self.transformed.get(name)
         if target is not None:
             return target
-        if name.startswith(TRANSFORMED_PREFIX):
-            raise ToolBridgeError(f"未知の変換済みtool名です: {name}")
         if name not in self.passthrough:
             raise ToolBridgeError(f"requestに無いtool callです: {name}")
         return None
@@ -156,17 +164,41 @@ def _name(value: object, label: str) -> str:
     return value
 
 
+def _grammar_suffix(tool: dict[str, Any]) -> str:
+    """custom toolのgrammarをdescriptionへ畳む。
+
+    Chat Completionsのfunctionにgrammarを載せる場所は無いので、modelが読める
+    唯一の場所へ入れる。定義が無ければ何も足さない。
+    """
+    fmt = tool.get("format")
+    if not isinstance(fmt, dict):
+        return ""
+    definition = fmt.get("definition")
+    if not isinstance(definition, str) or not definition:
+        return ""
+    syntax = fmt.get("syntax")
+    return f"\n\nFormat:\n```{syntax if isinstance(syntax, str) else ''}\n{definition}\n```"
+
+
 def _description(tool: dict[str, Any], target: ToolTarget) -> str:
+    """元のdescriptionを正本とし、grammarだけを足す。
+
+    以前はここへ日本語のprefixを付けていたが、変換後もtool名を保つように
+    なった（`_forwarded_name`）ので、名前を言い直す情報価値が無い。
+    """
     original = tool.get("description")
-    prefix = (
-        f"Codex namespace `{target.namespace}` の `{target.name}` tool。"
-        if target.namespace
-        else f"Codex custom tool `{target.name}`。"
-    )
-    return prefix + (f"\n{original}" if isinstance(original, str) and original else "")
+    base = original if isinstance(original, str) and original else ""
+    return base + (_grammar_suffix(tool) if target.kind == "custom" else "")
 
 
-def _strict_function(tool: dict[str, Any], forwarded: str, target: ToolTarget) -> dict[str, Any]:
+def _bridged_function(tool: dict[str, Any], forwarded: str, target: ToolTarget) -> dict[str, Any]:
+    """custom toolを、resellerが確実に扱えるplainなfunctionへ落とす。
+
+    `strict` と `additionalProperties` は**付けない**。2026-08-22にOpenRouterへ
+    直接測った結果、`strict:true` を付けた形は apply_patch を 0/4 でしか
+    引き出せず、外すと 3〜4/4 になった。structured outputsを公称するendpointが
+    DeepSeekでは 22/30 しか無く、`sort:"price"` は残りを普通に引く。
+    """
     if target.kind == "function":
         result = deepcopy(tool)
         result["name"] = forwarded
@@ -183,33 +215,74 @@ def _strict_function(tool: dict[str, Any], forwarded: str, target: ToolTarget) -
             "properties": {
                 field_name: {
                     "type": "string",
-                    "description": "Codexへそのまま渡すtool input。",
+                    "description": f"The {target.name} content following the specified format",
                 }
             },
             "required": [field_name],
-            "additionalProperties": False,
         },
-        "strict": True,
     }
 
 
-def _generated_name(index: int, used: set[str]) -> str:
-    candidate = f"{TRANSFORMED_PREFIX}{index:04d}"
+def _forwarded_name(target: ToolTarget, used: set[str]) -> str:
+    """変換後の名前。意味を保つため元の名前を捨てない。
+
+    top-levelはそのまま、namespace配下は `<namespace>__<name>` に平坦化する。
+    衝突は名前空間の潰れなので、推測で回避せず停止する。
+    """
+    candidate = (
+        f"{target.namespace}{NAMESPACE_DELIMITER}{target.name}"
+        if target.namespace
+        else target.name
+    )
     if candidate in used:
-        raise ToolBridgeError(f"変換済みtool名が既存functionと衝突します: {candidate}")
+        raise ToolBridgeError(f"変換済みtool名が既存toolと衝突します: {candidate}")
     used.add(candidate)
     return candidate
+
+
+def _tool_group(result: dict[str, Any]) -> tuple[str, int | None, list[Any]] | None:
+    """tool定義の在り処を返す。無ければ None。
+
+    codexにはtool送信形式が2つある（`codex-rs/core/src/client.rs`）。classicは
+    top-levelの `tools`、responses-lite（`use_responses_lite = true`）は
+    `input[]` の `{"type":"additional_tools", ...}` に載せる。lite形式を見て
+    いなかったのが実機gate 2の1つ目の原因で、Bridgeが一度も起動しなかった。
+
+    catalogのflagではなくpayloadの形で判定するので、テンプレートが将来
+    `use_responses_lite` を反転しても追随できる。
+    """
+    groups: list[tuple[str, int | None, list[Any]]] = []
+    tools = result.get("tools")
+    if tools is not None:
+        if not isinstance(tools, list):
+            raise ToolBridgeError("toolsは配列である必要があります")
+        groups.append(("tools", None, tools))
+    items = result.get("input")
+    if isinstance(items, list):
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("type") != "additional_tools":
+                continue
+            nested = item.get("tools")
+            if not isinstance(nested, list):
+                raise ToolBridgeError("additional_toolsのtoolsは配列である必要があります")
+            groups.append(("input", index, nested))
+    if not groups:
+        return None
+    if len(groups) > 1:
+        # classicとliteが同時に来る形をcodexは送らない。どちらを正本とみなすかを
+        # 推測する場面なので、変換せずに止める。
+        raise ToolBridgeError("tool定義がtop-levelとadditional_toolsの両方にあります")
+    return groups[0]
 
 
 def prepare_document(document: dict[str, Any]) -> PreparedRequest:
     if not isinstance(document, dict):
         raise ToolBridgeError("Responses requestはJSON objectである必要があります")
     result = deepcopy(document)
-    tools = result.get("tools")
-    if tools is None:
+    group = _tool_group(result)
+    if group is None:
         return PreparedRequest(result, ToolMap())
-    if not isinstance(tools, list):
-        raise ToolBridgeError("toolsは配列である必要があります")
+    location, location_index, tools = group
 
     used: set[str] = set()
     identities: set[tuple[str | None, str]] = set()
@@ -225,14 +298,11 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
             raise ToolBridgeError("tool definitionはobjectである必要があります")
         if tool.get("type") == "function":
             name = _name(tool.get("name"), "function")
-            if name in used or name.startswith(TRANSFORMED_PREFIX):
-                raise ToolBridgeError(f"function名が重複または予約済みです: {name}")
+            if name in used:
+                raise ToolBridgeError(f"function名が重複しています: {name}")
             used.add(name)
 
-    next_index = 0
-
     def add(tool: dict[str, Any], namespace: str | None) -> None:
-        nonlocal next_index
         kind = tool.get("type")
         if kind not in {"function", "custom"}:
             raise ToolBridgeError(f"未対応のCodex tool型です: {kind!r}")
@@ -248,19 +318,16 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
             output.append(deepcopy(tool))
             return
 
-        forwarded = _generated_name(next_index, used)
-        next_index += 1
         target = ToolTarget(
             kind=kind,
             name=name,
             namespace=namespace,
-            input_field=("patch" if name == "apply_patch" else "input")
-            if kind == "custom"
-            else None,
+            input_field=CUSTOM_INPUT_FIELD if kind == "custom" else None,
         )
+        forwarded = _forwarded_name(target, used)
         transformed[forwarded] = target
         original[identity] = forwarded
-        output.append(_strict_function(tool, forwarded, target))
+        output.append(_bridged_function(tool, forwarded, target))
 
     for tool in tools:
         if tool.get("type") != "namespace":
@@ -279,7 +346,13 @@ def prepare_document(document: dict[str, Any]) -> PreparedRequest:
             add(child, namespace)
 
     tool_map = ToolMap(transformed, original, frozenset(passthrough))
-    result["tools"] = output
+    # 元の置き場所へ戻す。lite形式にtop-level `tools` を新設すると、
+    # codexが送っていない形をupstreamへ見せることになる。
+    if location == "tools":
+        result["tools"] = output
+    else:
+        assert location_index is not None
+        result["input"][location_index]["tools"] = output
     _transform_request_input(result, tool_map)
     if "tool_choice" in result:
         result["tool_choice"] = _transform_tool_choice(result["tool_choice"], tool_map)

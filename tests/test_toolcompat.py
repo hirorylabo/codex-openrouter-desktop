@@ -23,11 +23,11 @@ def spec(*, zdr: bool = True, status: str = "declared") -> dict:
 
 def success(body: dict, _key: str) -> tuple[int, dict]:
     tool = body["tools"][0]
-    if tool["name"].startswith("codex_bridge_"):
+    if tool["name"] == "codex_freeform_probe":
         output = {
             "type": "function_call",
             "name": tool["name"],
-            "arguments": '{"input":"PING"}',
+            "arguments": '{"content":"PING"}',
         }
     else:
         output = {
@@ -74,14 +74,14 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(
             [body["tools"][0]["parameters"]["required"] for body in requests],
-            [["value"], ["input"]],
+            [["value"], ["content"]],
         )
         self.assertTrue(all(body["provider"] == {"zdr": True} for body in requests))
         self.assertNotIn("sk-or-", self.path.read_text(encoding="utf-8"))
 
     def test_structured_success_and_freeform_failure_is_partial(self) -> None:
         def requester(body, key):
-            if body["tools"][0]["name"].startswith("codex_bridge_"):
+            if body["tools"][0]["name"] == "codex_freeform_probe":
                 return 422, {"error": "custom tools unsupported"}
             return success(body, key)
 

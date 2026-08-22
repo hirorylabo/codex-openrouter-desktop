@@ -10,21 +10,35 @@ submodule、自動merge元にはしません。OpenAI公式のResponses仕様と
 | upstream | 参照commit | 参照対象 |
 | --- | --- | --- |
 | `MetaFARS/codex-relay` | `84586a12976400957747c0afcd61618e052bc97d`（release `v0.5.7`） | `src/translate.rs`, `src/stream.rs` |
-| `openai/codex` | `fcdf2b501412d85efa3ce6bc217b8b51d7ed792a` | `codex-rs/tools/src/tool_spec.rs`, `codex-rs/core/src/tools/handlers/apply_patch.rs` |
+| `openai/codex` | `fcdf2b501412d85efa3ce6bc217b8b51d7ed792a` | `codex-rs/tools/src/tool_spec.rs`, `codex-rs/core/src/tools/handlers/apply_patch.rs`, `codex-rs/core/src/client.rs`（classic / responses-lite の2形式） |
+| `BerriAI/litellm` (MIT) | `litellm 1.x` の `responses/litellm_completion_transformation/custom_tools.py` | custom→functionの変換契約（`{content:string}`、grammarをdescriptionへ、strictを付けない） |
+| `lidge-jun/opencodex` (MIT) | issue #1544 / #2106、`src/responses/tool-groups.ts` | top-level `tools` と lite `additional_tools` の**両方**からtool定義を集める考え方 |
 
 ## 採用した挙動
 
 - namespace childをrequest内で一意なfunction名へ平坦化し、responseで元の
   `namespace` / `name`へ戻す。
-- custom toolを必須string 1項目のstrict functionへ変換し、responseで
-  `custom_tool_call`へ戻す。`apply_patch`だけfield名を`patch`にする。
+- custom toolを必須string 1項目のplain functionへ変換し、responseで
+  `custom_tool_call`へ戻す。field名は常に`content`。
+  - **`strict` と `additionalProperties` は付けない。** 2026-08-22にOpenRouterへ
+    直接測った結果、`strict:true` を付けた形は`apply_patch`を 0/4 でしか
+    引き出せず、外すと 4/4 になった。DeepSeekで`structured_outputs`を公称する
+    endpointは 22/30 しかなく、`sort:"price"`は残りを普通に引く。
+  - custom toolの`format.definition`（lark）はdescriptionの末尾へ
+    ` ```<syntax>` fence で畳む。Chat Completionsのfunctionにgrammarを
+    載せる場所が無く、modelが読める唯一の場所がdescriptionのため。
+  - **変換後もtool名を保つ。** namespace配下だけ `<namespace>__<name>` へ
+    平坦化する。生成名（`codex_bridge_NNNN`）はmodelから意味を隠すため使わない。
+- tool定義はtop-levelの`tools`と、responses-lite形式の`input[].additional_tools`の
+  両方から集める。catalogの`use_responses_lite`に依存しない。
 - `call_id`、`item_id`、`output_index`とSSEのdelta/done順序を保持する。
 - 未知tool、重複名、不完全JSON、不正なSSE lifecycleを補正せずfail-closedにする。
 
 実装はOpenAI公式仕様を基にこのrepositoryで独自に記述しています。現時点で
-`codex-relay`のsource codeはコピーしていないため、追加のMIT provenance noticeは
-ありません。将来コードをコピーする場合は、同じ変更で出所・commit・license noticeを
-追加します。
+`codex-relay` / `litellm` / `opencodex` のsource codeはコピーしていません。
+LiteLLMとopencodexからは**変換の契約と着眼点**だけを参照し、コードは各々の
+構造に合わせて独自に書いています。将来コードをコピーする場合は、同じ変更で
+出所・commit・license noticeを追加します。
 
 ## 採用しなかった機能
 

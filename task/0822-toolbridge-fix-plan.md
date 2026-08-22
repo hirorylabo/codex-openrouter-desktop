@@ -237,15 +237,51 @@ call が返るかを 4回測る。**現行の形が 0/4 なので、ここが 4/
 
 ## Status
 
-**着手中**（2026-08-22 承認）。
+**実装完了・実機 Run 2 待ち**（2026-08-22）。
 
 | step | 状態 |
 | --- | --- |
-| 1. 回帰 test | 未 |
-| 2. F2/F3/F4/F7 | 未 |
-| 3. F5 命名 | 未 |
-| 4. F1 `additional_tools` | 未 |
-| 5. F6 catalog | 未 |
-| 6. 既存 test 更新 | 未 |
-| 7. `UPSTREAMS.md` | 未 |
-| 8. 実機 Run 2 | 未 |
+| 1. 回帰 test（6件、赤→緑を確認） | **完了** |
+| 2. F2/F3/F4/F7（strict除去・`content`・grammar・prefix除去） | **完了** |
+| 3. F5 命名（元の名前を保ち namespace は `__` 平坦化） | **完了** |
+| 4. F1 `additional_tools`（`_tool_group`） | **完了** |
+| 5. F6 catalog（`use_responses_lite: False`） | **完了** |
+| 6. 既存 test 更新 | **完了**（377 tests OK） |
+| 7. `UPSTREAMS.md` | **完了** |
+| 8. 実機 Run 2 | 未（promote と trial 撤去が先） |
+
+### 計画に無かったが必要だった変更
+
+**`TOOL_CONTRACT_VERSION` を 2 → 3 へ上げた。** wire を変えたので上げないと、
+`toolcompat` が古い契約下で測った結果をそのまま再利用する。実際 `state/tool-compatibility.json`
+には build 6849 / `partial` / **「structured functionは成功、freeform toolは非互換」**が
+残っていた —— これは `strict:true` を付けていた頃の測定で、いまは誤り。
+version を上げると `toolcompat.py:92` の判定で自動失効する。
+`models/tool-wire-builds.json` と 2つの fixture も 3 へ揃えた。
+
+fixture の custom tool に `format`（lark）を持たせた。従来は持っておらず、
+**grammar を捨てている実装の欠陥を test が隠していた**。
+
+### wire レベルの検証結果（F2 の合格条件）
+
+実装が生成する tool 定義をそのまま OpenRouter の `/responses` へ stream で 4 回送った:
+
+| 形 | 結果 |
+| --- | --- |
+| 旧実装（`codex_bridge_NNNN` / `patch` / `strict:true`） | **0/4** |
+| 新実装（`apply_patch` / `content` / strict なし / grammar あり） | **4/4**（60〜61B の正しい patch、`{"content":…}` の unwrap も成立） |
+
+### 次にやること
+
+1. runtime を promote する（`./codex-openrouter` は
+   `~/.local/share/codex-openrouter-desktop/current` を優先するため、
+   現状の `doctor` は**旧コード**を見ている。「tool contract 2で確認済み」表示がその証拠）
+2. codex-router trial を撤去する（併存不可。`bin/disable` → `config.toml` 差分ゼロ確認）
+3. 実機 Run 2 を gate 1 から
+
+### 保留（この変更の範囲外だが記録）
+
+`toolcompat` の **structured** canary は今も `strict:true` を送る。freeform canary は
+`prepare_document` を通るので F2 が自動で効くが、structured 側は本番と契約が違う。
+`tool_support` は description 表示にしか使われず可視性を gate しないので実害は小さいが、
+price-sort で structured 非対応 endpoint を引くと実態より悪く表示され得る。

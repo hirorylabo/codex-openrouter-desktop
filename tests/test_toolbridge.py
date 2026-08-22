@@ -42,16 +42,18 @@ class RequestBridgeTests(unittest.TestCase):
                 prepared = toolbridge.prepare_document(request(build))
                 self.assertTrue(prepared.tool_map.has_tools)
 
-    def test_function_passes_and_custom_namespace_become_strict_functions(self) -> None:
+    def test_function_passes_and_custom_namespace_become_plain_functions(self) -> None:
         prepared = toolbridge.prepare_document(request())
         tools = prepared.document["tools"]
         self.assertEqual("plain_status", tools[0]["name"])
         self.assertEqual("function", tools[0]["type"])
-        self.assertEqual("codex_bridge_0000", tools[1]["name"])
-        self.assertEqual(["patch"], tools[1]["parameters"]["required"])
-        self.assertIs(tools[1]["strict"], True)
-        self.assertEqual("codex_bridge_0001", tools[2]["name"])
-        self.assertIn("functions", tools[2]["description"])
+        # top-level custom は名前を保ち、strictを付けずに落とす。
+        self.assertEqual("apply_patch", tools[1]["name"])
+        self.assertEqual(["content"], tools[1]["parameters"]["required"])
+        self.assertNotIn("strict", tools[1])
+        # namespace配下は平坦化する。元のschemaはそのまま。
+        self.assertEqual("functions__exec", tools[2]["name"])
+        self.assertEqual(["cmd"], tools[2]["parameters"]["required"])
         self.assertNotIn("sort", prepared.document.get("provider", {}))
 
     def test_tool_choice_and_multi_turn_items_round_trip_to_forward_names(self) -> None:
@@ -77,16 +79,16 @@ class RequestBridgeTests(unittest.TestCase):
         ]
         prepared = toolbridge.prepare_document(document)
         self.assertEqual(
-            {"type": "function", "name": "codex_bridge_0000"},
+            {"type": "function", "name": "apply_patch"},
             prepared.document["tool_choice"],
         )
         self.assertEqual("function_call", prepared.document["input"][0]["type"])
         self.assertEqual(
-            {"patch": "*** Begin Patch\n*** End Patch"},
+            {"content": "*** Begin Patch\n*** End Patch"},
             json.loads(prepared.document["input"][0]["arguments"]),
         )
         self.assertEqual("function_call_output", prepared.document["input"][1]["type"])
-        self.assertEqual("codex_bridge_0001", prepared.document["input"][2]["name"])
+        self.assertEqual("functions__exec", prepared.document["input"][2]["name"])
         self.assertNotIn("namespace", prepared.document["input"][2])
 
     def test_duplicate_reserved_and_unknown_tool_shapes_fail_closed(self) -> None:
@@ -94,10 +96,12 @@ class RequestBridgeTests(unittest.TestCase):
         duplicate["tools"].append(duplicate["tools"][0])
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.prepare_document(duplicate)
-        reserved = request()
-        reserved["tools"][0]["name"] = "codex_bridge_0000"
+        # 平坦化した名前がtop-level functionと衝突する形。名前空間が潰れるので、
+        # どちらを優先するか推測せずに止める。
+        collision = request()
+        collision["tools"][0]["name"] = "functions__exec"
         with self.assertRaises(toolbridge.ToolBridgeError):
-            toolbridge.prepare_document(reserved)
+            toolbridge.prepare_document(collision)
         unsupported = request()
         unsupported["tools"] = [{"type": "web_search"}]
         with self.assertRaises(toolbridge.ToolBridgeError):
@@ -107,6 +111,100 @@ class RequestBridgeTests(unittest.TestCase):
         duplicate_namespace["tools"].append(duplicate_namespace["tools"][-1])
         with self.assertRaises(toolbridge.ToolBridgeError):
             toolbridge.prepare_document(duplicate_namespace)
+
+
+class WireContractRegressionTests(unittest.TestCase):
+    """実測が否定した契約を固定する。
+
+    2026-08-22にOpenRouterへ直接測った結果:
+    - `type:"custom"` をそのまま送ると tool call が一度も返らない（status 200・error なし）
+    - custom→function 変換に `strict:true` + `additionalProperties:false` を付けると
+      apply_patch は 0/4。外すと 3〜4/4
+    根拠: task/0822-toolbridge-fix-plan.md
+    """
+
+    def custom_tool(self) -> dict:
+        return {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a unified patch.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": 'start: "*** Begin Patch" LF\n',
+            },
+        }
+
+    def test_bridged_custom_tool_carries_no_strict_contract(self) -> None:
+        document = {"model": "m", "input": "go", "tools": [self.custom_tool()]}
+        tool = toolbridge.prepare_document(document).document["tools"][0]
+        self.assertNotIn("strict", tool)
+        self.assertNotIn("additionalProperties", tool["parameters"])
+        self.assertEqual(["content"], tool["parameters"]["required"])
+        self.assertEqual(["content"], list(tool["parameters"]["properties"]))
+
+    def test_grammar_is_folded_into_the_description(self) -> None:
+        document = {"model": "m", "input": "go", "tools": [self.custom_tool()]}
+        tool = toolbridge.prepare_document(document).document["tools"][0]
+        self.assertIn("Apply a unified patch.", tool["description"])
+        self.assertIn("Format:", tool["description"])
+        self.assertIn("```lark", tool["description"])
+        self.assertIn("*** Begin Patch", tool["description"])
+
+    def test_absent_grammar_adds_nothing(self) -> None:
+        bare = self.custom_tool()
+        bare.pop("format")
+        document = {"model": "m", "input": "go", "tools": [bare]}
+        tool = toolbridge.prepare_document(document).document["tools"][0]
+        self.assertEqual("Apply a unified patch.", tool["description"])
+
+    def test_tool_names_survive_and_namespaces_flatten(self) -> None:
+        prepared = toolbridge.prepare_document(request())
+        names = [tool["name"] for tool in prepared.document["tools"]]
+        self.assertEqual(["plain_status", "apply_patch", "functions__exec"], names)
+
+    def test_lite_additional_tools_engage_the_bridge(self) -> None:
+        """`use_responses_lite` 形式でもBridgeが起動する。
+
+        この形式ではtop-level `tools` が無く、tool定義は
+        `input[0].additional_tools` に載る。ここでreturnしていたのが
+        実機gate 2が落ちた1つ目の原因。
+        """
+        document = {
+            "model": "m",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [self.custom_tool()],
+                },
+                {"type": "message", "role": "user", "content": "go"},
+            ],
+        }
+        prepared = toolbridge.prepare_document(document)
+        self.assertTrue(prepared.tool_map.has_tools)
+        # 変換結果は元の置き場所へ戻す。top-level tools を新設しない。
+        self.assertNotIn("tools", prepared.document)
+        bridged = prepared.document["input"][0]["tools"][0]
+        self.assertEqual("function", bridged["type"])
+        self.assertEqual("apply_patch", bridged["name"])
+        self.assertNotIn("strict", bridged)
+
+    def test_lite_and_classic_cannot_both_carry_tools(self) -> None:
+        document = {
+            "model": "m",
+            "tools": [self.custom_tool()],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [self.custom_tool()],
+                }
+            ],
+        }
+        with self.assertRaises(toolbridge.ToolBridgeError):
+            toolbridge.prepare_document(document)
 
 
 class ResponseBridgeTests(unittest.TestCase):
@@ -120,7 +218,7 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_exec",
                     "call_id": "call_exec",
-                    "name": "codex_bridge_0001",
+                    "name": "functions__exec",
                     "arguments": '{"cmd":"pwd"}',
                     "status": "completed",
                 },
@@ -128,8 +226,8 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_patch",
                     "call_id": "call_patch",
-                    "name": "codex_bridge_0000",
-                    "arguments": '{"patch":"*** Begin Patch\\n*** End Patch"}',
+                    "name": "apply_patch",
+                    "arguments": '{"content":"*** Begin Patch\\n*** End Patch"}',
                     "status": "completed",
                 },
             ]
@@ -147,7 +245,7 @@ class ResponseBridgeTests(unittest.TestCase):
         self.assertEqual("call_patch", by_id["fc_patch"]["call_id"])
 
     def _stream(self) -> bytes:
-        patch_arguments = '{"patch":"*** Begin Patch\\n*** End Patch"}'
+        patch_arguments = '{"content":"*** Begin Patch\\n*** End Patch"}'
         documents = [
             {
                 "type": "response.output_item.added",
@@ -156,7 +254,7 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_patch",
                     "call_id": "call_patch",
-                    "name": "codex_bridge_0000",
+                    "name": "apply_patch",
                     "arguments": "",
                 },
             },
@@ -167,7 +265,7 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_exec",
                     "call_id": "call_exec",
-                    "name": "codex_bridge_0001",
+                    "name": "functions__exec",
                     "arguments": "",
                 },
             },
@@ -197,7 +295,7 @@ class ResponseBridgeTests(unittest.TestCase):
                 "item_id": "fc_exec",
                 "output_index": 1,
                 "sequence_number": 6,
-                "name": "codex_bridge_0001",
+                "name": "functions__exec",
                 "arguments": '{"cmd":"pwd"}',
             },
             {
@@ -207,7 +305,7 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_exec",
                     "call_id": "call_exec",
-                    "name": "codex_bridge_0001",
+                    "name": "functions__exec",
                     "arguments": '{"cmd":"pwd"}',
                 },
             },
@@ -216,7 +314,7 @@ class ResponseBridgeTests(unittest.TestCase):
                 "item_id": "fc_patch",
                 "output_index": 0,
                 "sequence_number": 8,
-                "name": "codex_bridge_0000",
+                "name": "apply_patch",
                 "arguments": patch_arguments,
             },
             {
@@ -226,7 +324,7 @@ class ResponseBridgeTests(unittest.TestCase):
                     "type": "function_call",
                     "id": "fc_patch",
                     "call_id": "call_patch",
-                    "name": "codex_bridge_0000",
+                    "name": "apply_patch",
                     "arguments": patch_arguments,
                 },
             },
@@ -297,7 +395,7 @@ class ResponseBridgeTests(unittest.TestCase):
                         "type": "function_call",
                         "id": "fc_patch",
                         "call_id": "call_patch",
-                        "name": "codex_bridge_0000",
+                        "name": "apply_patch",
                     },
                 }
             )
