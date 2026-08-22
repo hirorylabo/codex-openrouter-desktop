@@ -83,12 +83,12 @@ block は無傷）。ただし marker の外にも書き込みがある。
 
 | # | 確認 | 結果 | 観測 |
 | --- | --- | --- | --- |
-| 1 | picker に native GPT-5.6 と routed が両方出るか | 未実施 | ChatGPT.app 起動待ち |
+| 1 | picker に native GPT-5.6 と routed が両方出るか | **PASS** | 実機の picker に native `5.6 Sol` と curated 3件が並ぶ |
 | 2 | `bin/doctor` | **PASS** | routed 5件、gateway route 一致、venv・secret mode 600 すべて OK |
-| 3 | native GPT が router 経由でも動くか | 未実施 | |
-| 4 | service 停止で native GPT が死ぬか | 未実施 | 設計理解の裏取り |
-| 5 | DeepSeek V4 Flash 0731 で `apply_patch` を通す | 未実施 | gate 2 相当 |
-| 6 | ChatGPT.app 更新時に catalog 自動再取得が効くか | 未実施 | 次回更新を待つ |
+| 3 | native GPT が router 経由でも動くか | **PASS** | `router.log` に `model=gpt-5.6-sol provider=openai status=200`。`codex exec -m gpt-5.6-sol` も 6秒で完了 |
+| 4 | service 停止で native GPT が死ぬか | **PASS** | 追記3。停止中は 4202 が refused、native が `waiting for network` で無限リトライ |
+| 5 | DeepSeek V4 Flash 0731 で `apply_patch` を通す | **PASS** | 追記3。実機 2回 + probe 6/6 |
+| 6 | ChatGPT.app 更新時に catalog 自動再取得が効くか | 未実施 | app は `26.818.21641`/`6849` のまま。次回更新を待つ |
 
 ### 生成 catalog の実測（2026-08-22）
 
@@ -396,3 +396,257 @@ app 側が直ったため、天井は vendor の実天井 `max` のままで良�
 | 日本語ローカライズに `max` のラベルが無い | **否定**。`最大` は定義済み |
 | routed entry に native 固有フィールドが足りない | **否定**。差分は `tool_mode` と速度 tier のみで effort 描画に無関係 |
 | app が `max` を描画できない | **否定**。`kN()` は `max` を受理する。既定値配列の問題だった |
+
+---
+
+# 追記3（2026-08-22）: tool 互換の実証と gate 4 / gate 5
+
+**結論から。gate 5 PASS、gate 4 PASS。** trial の賭け ——「Responses 契約を捨てて Chat Completions
+へ落とせば DeepSeek でも `apply_patch` が通る」—— は実機で成立した。
+
+## なぜ測定手段を自作したか
+
+既存の `bin/test-model` では gate 5 を証明できない。probe は `type:"function"` + `strict:true` の
+plain JSON function を `stream:false` で送るだけで（`src/compatibility-test.mjs:34-69`）、
+**Codex が実際に送る freeform (`type:"custom"` + lark grammar) の経路を一度も踏まない**。
+PASS しても必要条件どまり。
+
+一方 LiteLLM には custom→function の bridge が実装済みだった
+（`.venv/.../litellm/responses/litellm_completion_transformation/custom_tools.py`、
+`transformation.py:1305,1390-1407`、`streaming_iterator.py:107,303`。docstring が Codex CLI を名指し）。
+curated model は `litellm.yaml` で `use_chat_completions_api: true` なので、この bridge が必ず経路に入る。
+
+外部報告（cc-switch / knightli の DeepSeek routing guide）は「Codex の OpenAI 固有 tool payload を
+DeepSeek V4 は route を問わず拒否した」と言う。**その拒否を bridge が回避できるか**が gate 5 の正体で、
+モデルの賢さの検証ではない。
+
+## Phase 1: freeform apply_patch probe（repo 外）
+
+`~/.local/share/codex-openrouter-trial/probes/apply-patch-probe.mjs`。app を挟まず bridge の往復だけを測る。
+Codex と同形の `{type:"custom", name:"apply_patch", format:{type:"grammar", syntax:"lark", ...}}` を
+`/responses` へ投げ、`output[]` に `custom_tool_call` が来て `input` が `*** Begin Patch` で始まり
+`*** End Patch` で終わるかを見る。**stream / 非stream の両方**を測る（LiteLLM は別コード経路で、
+ChatGPT.app は stream する）。
+
+| model | 非stream | stream |
+| --- | --- | --- |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | **PASS** (61B) | **PASS** (61B) |
+| `openrouter/deepseek/deepseek-v4-pro-0813` | **PASS** (60B) | **PASS** (60B) |
+| `openrouter/moonshotai/kimi-k3` | **PASS** (61B) | **PASS** (60B) |
+
+**6/6。** 初回は stream 側が 0 長と出たが、これは probe のバグだった —— stream は同じ item を
+`output_item.added`（`status:"in_progress"`, `input:""`）と `output_item.done`（完成形）で2回流すのに、
+最初の一致を返していた。判定を「name ごとに最長の input を採る」へ直し、**保存済みの生レスポンスを
+`--replay` で再判定**して確認した（再課金なし）。生レスポンスを毎回ファイルへ落としておくのは、
+判定バグを同じターンの再購入なしに直せるという意味で価値がある。
+
+対照に置いた native `commandcode/gpt-5.6-sol` は 409（`Provider commandcode is hidden`）で取れていない。
+対照の目的は失敗時の切り分けなので、routed が全通した以上不要と判断し、環境を変える
+`providers enable` はしていない。
+
+### bridge が wire 上で何をしているか（実測）
+
+forwarder に届いた時点の `apply_patch`:
+
+```
+type: "function"          （custom ではない）
+parameters.properties: ["content"]
+description: 708〜1331 B、"*** Begin Patch" と "Format:" を含む
+format: null              （grammar は description へ畳まれて消える）
+```
+
+事実として bridge は経路に入っており、期待どおり動いている。
+
+## gate 5: 実機（ChatGPT.app + DeepSeek V4 Flash）
+
+**2回通った。**
+
+1回目（`Update target.py` スレッド）。私が用意した検証用ディレクトリではなく **repo 直下**に
+`target.py` を新規作成した（app の作業ディレクトリが repo root だったため）。内容:
+
+```python
+def farewell(name: str) -> str:
+    return f"Goodbye, {name}!"
+```
+
+このターンのログには `apply_patch のパースエラーです。Add File 時に空でないコンテンツを渡す
+フォーマットに問題があるようです。既存パターンに従って正しい構文で再試行します。` が残っている。
+**freeform apply_patch は初回で文法を外し、自己修正して通した。** 通ることと一発で通ることは別、
+というのがここでの実測。
+
+2回目（クリーンな最小プロンプト）。`~/.local/share/codex-openrouter-trial/gate5/target.py` へ着弾:
+
+```diff
+ def greet(name):
+     return f"Hello, {name}"
++
++
++def farewell(name):
++    return f"Goodbye, {name}"
+```
+
+| 項目 | 実測 |
+| --- | --- |
+| モデル | `openrouter-deepseek-deepseek-v4-flash-0731` のみ |
+| リクエスト数 / 所要 | 8 / **31秒** |
+| `tool_choice` | `auto`（書き換えなし） |
+| `parallel_tool_calls` | **`true` を送信し、そのまま通過**（再スコープ後） |
+
+1回目は 17 リクエスト / 15分かかった。差は文脈汚染 —— こちらの報告文がそのままプロンプトに入り、
+モデルが「計画の裏取り（読み取りのみ）」を始めた。**gate の試行には補足なしの一文を投げる。**
+
+## Phase 0b: patch の再スコープ（実測が既定を否定した）
+
+一時的な capture block を forwarder へ入れ、**payload の形だけ**（本文は書かない）を 1 ターン記録した。
+gate は env var ではなくファイルの存在にした —— macOS の LaunchAgent は固定 allowlist で環境変数を
+書き出すため（`src/service-macos.mjs`）、shell の export は常駐 service に届かない。
+
+観測（app の実トラフィック）:
+
+| 項目 | 実測 | 旧 patch の挙動 |
+| --- | --- | --- |
+| `tool_choice` | app は `"auto"` を送る | 書き換え発生せず（**app に対しては no-op**） |
+| `parallel_tool_calls` | app は **`true` を送る** | **削除していた** |
+| `tool_choice: "required"` | `bin/test-model` の compat probe が送る | **`"auto"` へ潰していた**（3モデル分捕捉） |
+
+つまり旧 patch の downgrade は app には効かず、効くのは compatibility probe と subagent payload relay
+—— まさに上流 `auto-tool-choice` のコメントが「reseller 全体に掛けると壊れる」と警告していた対象だけ。
+
+そこで前提そのものを上流へ直接当てた。`/api/v1/chat/completions` に
+`provider {sort:"price", zdr:true, data_collection:"deny"}` + `tool_choice:"required"`:
+
+| model | reasoning high | reasoning なし |
+| --- | --- | --- |
+| `deepseek/deepseek-v4-flash-0731` | 強制 call を履行 | 履行 |
+| `deepseek/deepseek-v4-pro-0813` | 履行 | 履行 |
+| `moonshotai/kimi-k3` | 履行 | 履行 |
+
+**6/6 が受け付けた。「DeepSeek は thinking mode で forced tool choice を拒否する」は、この3モデルと
+`sort:"price"` が引く endpoint（Sail Research / Modal）では成り立たない。** 前提が無く、害だけがある。
+
+→ **tool 契約を書き換える処理をすべて per-model opt-in へ分離した。** 追記1 の block を次で置き換える:
+
+```js
+  // >>> codex-openrouter-trial:openrouter-provider-profiles >>>
+  if (String(model.requestProfile || "").startsWith("openrouter-")) {
+    const profile = String(model.requestProfile);
+    const strict = profile.endsWith("-strict");
+    payload.provider = {
+      ...(payload.provider || {}),
+      sort: "price",
+      ...(profile.includes("-zdr") ? { zdr: true, data_collection: "deny" } : {}),
+      ...(strict ? { require_parameters: true } : {}),
+    };
+    if (strict) delete payload.parallel_tool_calls;
+    if (
+      (strict || profile.endsWith("-autotool")) &&
+      payload.tool_choice !== undefined &&
+      payload.tool_choice !== "none"
+    ) {
+      payload.tool_choice = "auto";
+    }
+  }
+  // <<< codex-openrouter-trial:openrouter-provider-profiles <<<
+```
+
+| profile | provider block | `tool_choice`→auto | `parallel_tool_calls` 削除 |
+| --- | --- | --- | --- |
+| `openrouter-zdr-floor`（既定） | ✓ | – | – |
+| `openrouter-zdr-floor-autotool` | ✓ | ✓ | – |
+| `openrouter-zdr-strict` | ✓ + `require_parameters` | ✓ | ✓ |
+
+正本 `patches/apply-openrouter-provider-profiles.py` も更新済み（`--remove` を追加）。post-merge hook と
+`codex-router-update` wrapper は現行のまま動作を確認した。
+
+**再スコープ後の検証**: capture で 3モデルとも `tool_choice: "required" → "required"` の素通りを確認。
+`bin/test-model` は Pro 4/4・Kimi 4/4・Flash 4/4（連続2回）PASS ——
+**forced tool call が本物になった状態で全項目通過**した。
+
+## 計画になかった実測 2 件
+
+### router は全 routed request に app tool 18件を注入する
+
+probe が tool 1件しか送っていないのに forwarder には 19件届いた。`router.mjs:2120` の
+`mergeCodexAppTools` が、client が送っていない namespace も無条件で足す（`codex-app-tools.mjs:1227-1231`）。
+コメント上は意図的で、routed model に native と同じ toolset を見せるための設計。
+
+### 1 リクエストが約 521KB ある
+
+`router.log` の `est_input` は「上流へ実際に送ったバイト数 ÷ 3.3」で、OpenRouter が input tokens を
+0 で返すときの代替値（`response-usage.mjs:227` `estimateInputTokens`）。gate 5 のターンは
+`est_input=157,885` ≈ **521KB / リクエスト**。2行の関数を足すのに 8 リクエスト分これが飛ぶ。
+
+app が送る tool の内訳（実測 191件 / description だけで 58,704 B）:
+
+| 出所 | tool 数 | description B |
+| --- | --- | --- |
+| `mcp__*` | 153 | 43,099 |
+| `codex_app__*` + `plugin_management__*`（**router 注入**） | 18 | 6,609 |
+| 素の Codex tool（`exec_command` / `apply_patch` 他） | 13 | 4,266 |
+| `collaboration__*` | 6 | 2,995 |
+| `image_gen__*` | 1 | 1,735 |
+
+router 注入分は serialize して 31,351 B（≈9.5k tokens、**全体の約6%**）。
+**遅さの主因は MCP の 153件**であって router 注入ではない。削るならそちら。
+
+## gate 4: service 停止で native GPT が死ぬか → **死ぬ**
+
+headless で実測した（GUI 自動操作はユーザー作業と干渉するため使わない）。
+`codex` CLI は同じ `~/.codex/config.toml` を読むので、native を明示して同じ経路を叩ける。
+
+```
+codex exec --skip-git-repo-check -m gpt-5.6-sol "Reply with exactly OK."
+```
+
+| service | 結果 |
+| --- | --- |
+| running | `OK` を返して **6秒**で完了（exit 0） |
+| stopped | 4202 が `Connection refused (os error 61)`。websocket 再接続 5回すべて失敗 → HTTPS フォールバックも失敗 → `Reconnecting... waiting for network` を無限ループ。**90秒で kill** |
+
+停止窓（08:09:41–08:11:12 UTC）の `router.log` は**1行も出ていない**。native / routed とも
+router に到達していない。**グレースフルな失敗ですらなく、native がネットワーク待ちでハングし続ける。**
+既知のリスク「native GPT が router 依存になる」は実測で確定した。
+
+## 前の記述の訂正 2 件
+
+**1. `bin/stop` / `bin/start` は停止・起動の対ではない。** `bin/start` の実体は
+`exec node src/start.mjs` で **foreground 実行**。LaunchAgent に載らないため `launchctl` から消え、
+`bin/status` が `loaded:false` になる。実際にこれで「止めたはずの router が管理外で復活する」状態を
+作ってしまった。正しい対は **`bin/control service stop` / `bin/control service start`**
+（`src/control.mjs:2278` `handleService`）。
+
+**2. `bin/test-model` の FAIL 表示は当てにならない。** `compatibility-test.mjs` の `streaming()` は
+`detail` を `response.ok` だけで決めるため、**`ok:false` でも「stream text and completion event verified」
+と表示する**。`--json` の `ok` を見ること。
+
+## 撤去済み
+
+capture block は Phase 1 完了時に外した（`apply-capture-block.py --remove`）。
+`grep -c "codex-openrouter-trial:" src/api-forwarder.mjs` は **2**（provider-profile の marker のみ）、
+`node --check` OK、`bin/status` は `ok:true, degraded:[]`。
+
+trial 用の道具は repo 外に残してある:
+
+| 場所 | 用途 |
+| --- | --- |
+| `patches/apply-openrouter-provider-profiles.py` | 再スコープ済み正本（`--remove` 付き） |
+| `patches/apply-capture-block.py` | payload 形状 capture（冪等・`--remove` 付き。現在は未適用） |
+| `probes/apply-patch-probe.mjs` | freeform apply_patch probe（`--replay` 付き） |
+| `gui/app.sh` | ChatGPT.app の GUI driver。**使わない方針**（下記） |
+| `2026-08-22/payload-capture.jsonl` | 50行の形状ログ |
+
+`gui/app.sh` は作って動作もしたが（activate / clear / clipboard 貼り付け / `AXStandardWindow` 選択 /
+`screencapture -R`）、**ユーザーが同じ Mac を使っている間はフォーカス奪取が干渉する**ため運用しない。
+なお ChatGPT.app は Chromium で web content の AX ツリーを露出しないので、構造ベース操作は不可。
+日本語 IME 有効時は `keystroke` の ASCII が仮名変換される（`Reply with exactly` →
+`Replyウィテェぁctly`）ため、入力はクリップボード経由が必須だった。
+
+## 再検証しなくてよいこと（追加分）
+
+| 事項 | 結論 |
+| --- | --- |
+| `bin/test-model` で gate 5 を測れるか | **測れない**。probe は plain JSON function + `stream:false` で freeform 経路を踏まない |
+| LiteLLM の custom→function bridge は実在するか | **実在し、経路に入っている**。`{content:string}` へ落として grammar を description へ畳む |
+| DeepSeek / Kimi は `tool_choice:"required"` を拒否するか | **拒否しない**（3モデル × thinking 有無で 6/6 履行） |
+| routed request の tool 数が多い理由 | router が app toolset 18件を無条件注入する仕様（`mergeCodexAppTools`） |
+| 遅さの主因 | **MCP 153件**。router 注入は全体の約6% |

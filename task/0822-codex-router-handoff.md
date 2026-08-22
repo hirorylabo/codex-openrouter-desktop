@@ -73,20 +73,24 @@ marker 外に `model_catalog_json` / `openai_base_url` が残っていると自�
 
 | # | 内容 | 状態 |
 | --- | --- | --- |
-| 1 | **gate 5**: DeepSeek V4 Flash で `apply_patch` を通す | 未実施。trial の核心 |
-| 2 | service を止めて native GPT が死ぬことの確認 | 未実施 |
-| 3 | 次の ChatGPT.app 更新で catalog 自動再取得が効くか | 次回更新待ち |
-| 4 | patch を upstream へ PR | 未着手。通れば patch/hook/wrapper が全て不要になる |
+| 1 | **gate 5**: DeepSeek V4 Flash で `apply_patch` を通す | **PASS**（実機2回 + probe 6/6）。追記3 |
+| 2 | service を止めて native GPT が死ぬことの確認 | **PASS**。停止中は native が `waiting for network` で無限リトライ。追記3 |
+| 3 | 次の ChatGPT.app 更新で catalog 自動再取得が効くか | 次回更新待ち（app は `6849` のまま） |
+| 4 | patch を upstream へ PR | 未着手。**再スコープ後の block で出す**（追記3）。通れば patch/hook/wrapper が全て不要になる |
 | 5 | `enabled-reasoning-efforts` の件を openai/codex へ報告 | 未着手（#33805 等に既報あり） |
-| 6 | main の 5 commit を push | 未実施 |
+| 6 | main の 5 commit を push | **完了** |
 
-### gate 5 の読み方（重要）
+残っているのは 3・4・5 の 3 件のみ。3 は待ちで、4 と 5 は upstream への報告。
 
-**非対称に読む。** 1回通れば「Responses 契約を捨てて Chat Completions に落とせば解ける」の実証。
-失敗は保留 — codex-router は OpenRouter へ provider 選好を送らない設計だったため、
-0821 §1.7 の provider 抽選ノイズが残る（patch で `sort`/`zdr` は入れたが
-`require_parameters` は既定 off）。失敗が続くなら `openrouter-zdr-strict` へ一時切り替えて
-抽選を潰した状態で再試行する。
+### gate 5 の結果
+
+**通った。** 実機 2回（ChatGPT.app + DeepSeek V4 Flash が `apply_patch` でファイルを編集）と、
+app を挟まない freeform probe 6/6（3モデル × stream/非stream）。`openrouter-zdr-strict` への
+切り替えは不要だった。詳細は trial note の追記3。
+
+gate の試行を投げるときは**補足なしの一文にする**。実測で、こちらの報告文が app のプロンプトへ
+混入したターンはモデルが「読み取りのみ」に倒れ、17リクエスト / 15分かかった（クリーンな試行は
+8リクエスト / 31秒）。
 
 ## 再検証しなくてよいこと
 
@@ -97,3 +101,9 @@ marker 外に `model_catalog_json` / `openai_base_url` が残っていると自�
 | effort に `max` が出ない | **OpenAI 側のバグ**。`[desktop]` の `enabled-reasoning-efforts` で解決済み |
 | `ultra` を使う案 | 不要になった。なお OpenRouter は `ultra` を受け付けない |
 | 自作実装の PR #24 | draft のまま保持。`codex/openrouter-tool-bridge` @ `381c660` |
+| `bin/test-model` で gate 5 を測れるか | **測れない**。probe は plain JSON function + `stream:false` で freeform 経路を踏まない |
+| LiteLLM の custom→function bridge | **実在し経路に入る**。`{content:string}` へ落として grammar を description へ畳む |
+| DeepSeek / Kimi は `tool_choice:"required"` を拒否するか | **拒否しない**（3モデル × thinking 有無で 6/6 履行）。既定 profile から downgrade を外した |
+| service の停止・起動コマンド | **`bin/control service stop` / `bin/control service start`**。`bin/start` は foreground 実行で LaunchAgent に載らない |
+| `bin/test-model` の FAIL 表示 | `detail` は `response.ok` だけで決まるので当てにならない。`--json` の `ok` を見る |
+| routed request が遅い理由 | 1リクエスト約 521KB。tool 191件のうち **MCP が 153件**。router 注入分は約6% |
