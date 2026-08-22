@@ -1,5 +1,8 @@
 # 0822 Run 2 ハンドオフ: 自作実装へ戻したが gate 1 で止まっている
 
+> **[2026-08-22 解決済み]** 後続の `0822-run3-handoff.md` で解決。
+> 原因は web_search 型（local_shell ではなかった）。翻訳実装は commit `befc4d4`。
+
 作成日: 2026-08-22 / branch: `codex/openrouter-tool-bridge` @ `efe3957`（push 済み）
 
 Status: **中断。環境は自作実装へ切り替え済みで稼働中。実機 gate 1 が `tool_bridge_error` で落ちる。**
