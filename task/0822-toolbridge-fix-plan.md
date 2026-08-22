@@ -249,6 +249,7 @@ call が返るかを 4回測る。**現行の形が 0/4 なので、ここが 4/
 | 6. 既存 test 更新 | **完了**（377 tests OK） |
 | 7. `UPSTREAMS.md` | **完了** |
 | 8. 実機 Run 2 | 未（promote と trial 撤去が先） |
+| CLI 動作確認 | **完了**（`check` PASS / `verify-tools` 3回とも `verified`） |
 
 ### 計画に無かったが必要だった変更
 
@@ -271,6 +272,41 @@ fixture の custom tool に `format`（lark）を持たせた。従来は持っ�
 | 旧実装（`codex_bridge_NNNN` / `patch` / `strict:true`） | **0/4** |
 | 新実装（`apply_patch` / `content` / strict なし / grammar あり） | **4/4**（60〜61B の正しい patch、`{"content":…}` の unwrap も成立） |
 
+### CLI での動作確認（2026-08-22、repo source）
+
+```
+./codex-openrouter check
+  → CHECK: PASS  /  tool_wire=compatible contract=3
+```
+
+`models verify-tools`（実 API の canary。`prepare_document` を通る）:
+
+| run | 結果 |
+| --- | --- |
+| 1 | `unsupported` —— **structured** canary が失敗。freeform は短絡で未試行 |
+| 2〜4 | **`verified`** ——「Tool Bridge経由でstructured functionとfreeform toolを実測済み」 |
+
+cache は contract 3 / `verified` に更新された。**修正前の同じ canary は `partial` /
+「freeform toolは非互換」を記録していた**ので、CLI 経路でも freeform bridge が
+通るようになったことが確認できた。
+
+run 1 の `unsupported` は provider 抽選による structured canary の外れ。
+0821 §1.7 でも「structuredは3/4成功」と実測しており、今回も 3/4 で一致する。
+**canary は本質的に揺れるので 1回で判定しない。**
+
+> `doctor` サブコマンドは installed の doctor バイナリを exec するため
+> （`cli.py:517`）、repo の変更は反映されない。repo source を見るのは `check`。
+
+### 判明した設計上の弱点（この変更の範囲外）
+
+**structured canary が失敗すると freeform を一度も試さない**（`toolcompat.py:333-337`）。
+structured probe は `strict:true` + `enum` を送り、`sort` を指定しないので毎回別の
+endpoint を引く。DeepSeekで structured_outputs を公称するのは 22/30 なので、
+外れを引くと **freeform が健全でも `unsupported` と表示される**。
+`tool_support` は description 表示専用で可視性を gate しないため実害は小さいが、
+「1回の外れで実態より悪く出る」性質は残る。対処するなら短絡をやめて両方測るか、
+canary に `sort` を付けて endpoint を固定する。
+
 ### 次にやること
 
 1. runtime を promote する（`./codex-openrouter` は
@@ -278,10 +314,3 @@ fixture の custom tool に `format`（lark）を持たせた。従来は持っ�
    現状の `doctor` は**旧コード**を見ている。「tool contract 2で確認済み」表示がその証拠）
 2. codex-router trial を撤去する（併存不可。`bin/disable` → `config.toml` 差分ゼロ確認）
 3. 実機 Run 2 を gate 1 から
-
-### 保留（この変更の範囲外だが記録）
-
-`toolcompat` の **structured** canary は今も `strict:true` を送る。freeform canary は
-`prepare_document` を通るので F2 が自動で効くが、structured 側は本番と契約が違う。
-`tool_support` は description 表示にしか使われず可視性を gate しないので実害は小さいが、
-price-sort で structured 非対応 endpoint を引くと実態より悪く表示され得る。
