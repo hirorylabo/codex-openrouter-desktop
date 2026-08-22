@@ -23,6 +23,12 @@ enum ProfileBridge {
         /// 省略時は安全側のtrue。非必須で読むのは、古いCLIと新しいランチャーが
         /// 一瞬でも噛み合ったときに、画面ごと「応答を解釈できません」で潰さないため。
         let zdrSupported: Bool?
+        let toolSupport: String?
+        let toolSupportReason: String?
+        let toolVerifiedAt: Double?
+        let toolProvider: String?
+        let toolProviderAttempt: Int?
+        let toolContractVersion: Int?
     }
 
     struct Selection: Decodable {
@@ -69,12 +75,56 @@ enum ProfileBridge {
         let free: Bool
         let headline: Price
         let usageTokens: [String: String]?
+        let toolSupport: String?
+        let toolSupportReason: String?
+        let toolVerifiedAt: Double?
+        let toolProvider: String?
+        let toolProviderAttempt: Int?
+        let toolContractVersion: Int?
+
+        func replacingToolState(with result: ToolResult) -> CatalogEntry {
+            CatalogEntry(
+                id: id,
+                displayName: displayName,
+                description: description,
+                created: created,
+                contextWindow: contextWindow,
+                efforts: efforts,
+                defaultEffort: defaultEffort,
+                zdrSupported: zdrSupported,
+                trainsOnData: trainsOnData,
+                free: free,
+                headline: headline,
+                usageTokens: usageTokens,
+                toolSupport: result.toolSupport,
+                toolSupportReason: result.toolSupportReason,
+                toolVerifiedAt: result.toolVerifiedAt,
+                toolProvider: result.toolProvider,
+                toolProviderAttempt: result.toolProviderAttempt,
+                toolContractVersion: result.toolContractVersion
+            )
+        }
     }
 
     struct Catalog: Decodable {
         let schemaVersion: Int
         let models: [CatalogEntry]
         let usageAvailable: Bool
+    }
+
+    struct ToolResult: Decodable {
+        let id: String
+        let toolSupport: String
+        let toolSupportReason: String
+        let toolVerifiedAt: Double?
+        let toolProvider: String?
+        let toolProviderAttempt: Int?
+        let toolContractVersion: Int?
+    }
+
+    struct ToolVerification: Decodable {
+        let schemaVersion: Int
+        let results: [ToolResult]
     }
 
     static var executable: URL {
@@ -99,11 +149,31 @@ enum ProfileBridge {
         return catalog
     }
 
-    static func apply(models: [String], defaultModel: String) throws -> Outcome {
+    static func verifyTools(models: [String]) throws -> ToolVerification {
+        let payload: [String: Any] = [
+            "schema_version": documentSchemaVersion,
+            "models": models,
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            throw Failure(message: "tool検査対象をJSONへ変換できませんでした。")
+        }
+        let result: ToolVerification = try decode(
+            run(["models", "verify-tools", "--stdin-json"], input: body)
+        )
+        try assertSupported(result.schemaVersion)
+        return result
+    }
+
+    static func apply(
+        models: [String],
+        defaultModel: String,
+        toolRiskAcknowledged: [String] = []
+    ) throws -> Outcome {
         let payload: [String: Any] = [
             "schema_version": documentSchemaVersion,
             "models": models,
             "default_model": defaultModel,
+            "tool_risk_acknowledged": toolRiskAcknowledged,
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             throw Failure(message: "設定内容をJSONへ変換できませんでした。")

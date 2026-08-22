@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "upstreams": [
+    {
+      "name": "codex-relay",
+      "repository": "MetaFARS/codex-relay",
+      "branch": "master",
+      "commit": "84586a12976400957747c0afcd61618e052bc97d",
+      "release": "v0.5.7",
+      "files": [
+        {
+          "path": "src/translate.rs",
+          "sha256": "c55fe97bed3af5de8a1a80d5946fe4a49565bfcb2bd564d6afc09e2ca82aa934"
+        },
+        {
+          "path": "src/stream.rs",
+          "sha256": "84bfff0f59899fd4369f679e2c27031bc07951b02a65e00c510d05ab4de215b6"
+        }
+      ]
+    },
+    {
+      "name": "openai-codex",
+      "repository": "openai/codex",
+      "branch": "main",
+      "commit": "fcdf2b501412d85efa3ce6bc217b8b51d7ed792a",
+      "files": [
+        {
+          "path": "codex-rs/tools/src/tool_spec.rs",
+          "sha256": "af8b5286fb6d2eb3574c484b25076f515bca2d4350ecb5059e436966ecdd519d"
+        },
+        {
+          "path": "codex-rs/core/src/tools/handlers/apply_patch.rs",
+          "sha256": "7e89d749d0111a59d3f46c42d895f019b050310e666fcfdcf2f99fb6bed20eca"
+        }
+      ]
+    }
+  ]
+}

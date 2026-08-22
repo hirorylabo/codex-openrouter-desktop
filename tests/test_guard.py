@@ -27,12 +27,12 @@ class RecordingForwarder:
     """呼ばれたら記録する。拒否経路で呼ばれないことを証明するために使う。"""
 
     def __init__(self, status: int = 200, payload: bytes = b"data: ok\n\n"):
-        self.calls: list[tuple[bytes, str]] = []
+        self.calls: list[tuple[bytes, str, bool]] = []
         self.status = status
         self.payload = payload
 
-    def __call__(self, body: bytes, key: str):
-        self.calls.append((body, key))
+    def __call__(self, body: bytes, key: str, metadata_enabled: bool):
+        self.calls.append((body, key, metadata_enabled))
         return self.status, {"Content-Type": "text/event-stream"}, io.BytesIO(self.payload)
 
 
@@ -130,6 +130,52 @@ class AllowlistTests(GuardTestCase):
         self.assertEqual(self.forwarder.calls, [])
         self.assertEqual(self.log_records(), [])
 
+    def test_tool_request_is_bridged_and_enables_router_metadata(self):
+        self.forwarder.payload = b"".join(
+            [
+                b'data: {"type":"response.completed","response":{"output":[]},'
+                b'"openrouter_metadata":{"attempts":[{"provider_name":"Example",'
+                b'"status":200}],"endpoints":[{}]}}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        )
+        status, payload = self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "patch",
+                "tools": [{"type": "custom", "name": "apply_patch"}],
+            }
+        )
+        self.assertEqual(200, status)
+        forwarded, _key, metadata_enabled = self.forwarder.calls[0]
+        tool = json.loads(forwarded)["tools"][0]
+        self.assertEqual("function", tool["type"])
+        self.assertEqual("apply_patch", tool["name"])
+        self.assertEqual(["content"], tool["parameters"]["required"])
+        self.assertNotIn("strict", tool)
+        self.assertTrue(metadata_enabled)
+        self.assertNotIn(b"openrouter_metadata", payload)
+        record = self.log_records()[0]
+        self.assertEqual("Example", record["provider"])
+        self.assertEqual(1, record["provider_attempt"])
+
+    def test_invalid_tool_contract_is_denied_before_key_or_forwarder(self):
+        self.guard.key_provider = lambda: (_ for _ in ()).throw(
+            AssertionError("Keychain must not be read")
+        )
+        status, payload = self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "x",
+                # web_search型はserver toolへ翻訳されるため拒否されない。
+                # 拒否対象は未知型。codex 0.148.0の型集合の外側を出す。
+                "tools": [{"type": "local_shell"}],
+            }
+        )
+        self.assertEqual(400, status)
+        self.assertIn(b"tool_bridge_error", payload)
+        self.assertEqual([], self.forwarder.calls)
+
 
 class LoggingTests(GuardTestCase):
     def test_denied_request_is_logged_without_body(self):
@@ -145,6 +191,158 @@ class LoggingTests(GuardTestCase):
         text = self.log.read_text()
         self.assertIn("forwarded", text)
         self.assertNotIn("sk-or-test-key", text)
+
+
+class ToolTelemetryTests(GuardTestCase):
+    """toolを含むupstream requestに、漏れないtelemetryだけを足す。"""
+
+    # guard logに出てよいkeyの全集合。増やすときは非漏洩を先に証明すること。
+    ALLOWED_KEYS = frozenset(
+        {
+            "t",
+            "model",
+            "decision",
+            "bytes",
+            "status",
+            "provider",
+            "provider_attempt",
+            "candidate_count",
+            "router_status",
+            "tool_request",
+            "duration_ms",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+        }
+    )
+    CANARIES = (
+        "canary-user-prompt-4412",
+        "canary_tool_name",
+        "canary-tool-argument",
+        "canary-tool-output",
+        "canary-pipeline-secret",
+        "sk-or-test-key",
+        "openrouter_metadata",
+        "pipeline",
+    )
+
+    def tool_post(self, payload: bytes, content_type: str = "text/event-stream"):
+        status = self.forwarder.status
+
+        def forward(body, key, metadata_enabled):
+            self.forwarder.calls.append((body, key, metadata_enabled))
+            return status, {"Content-Type": content_type}, io.BytesIO(payload)
+
+        self.guard.forwarder = forward
+        return self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "canary-user-prompt-4412",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "canary_tool_name",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    }
+                ],
+            }
+        )
+
+    @staticmethod
+    def completed_stream(usage: dict | None = None, metadata: bool = True) -> bytes:
+        response: dict = {"output": []}
+        if usage is not None:
+            response["usage"] = usage
+        document: dict = {"type": "response.completed", "response": response}
+        if metadata:
+            document["openrouter_metadata"] = {
+                "attempts": [{"provider_name": "Example", "status": 200}],
+                "endpoints": [{}],
+                "pipeline": [{"note": "canary-pipeline-secret"}],
+            }
+        return (
+            b"data: " + json.dumps(document).encode() + b"\n\n" + b"data: [DONE]\n\n"
+        )
+
+    def test_tool_request_records_only_allowed_safe_fields(self):
+        status, payload = self.tool_post(
+            self.completed_stream(
+                {
+                    "input_tokens": 41,
+                    "output_tokens": 7,
+                    "input_tokens_details": {"cached_tokens": 32},
+                }
+            )
+        )
+        self.assertEqual(200, status)
+        self.assertNotIn(b"openrouter_metadata", payload)
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertIs(True, record["tool_request"])
+        self.assertIsInstance(record["duration_ms"], int)
+        self.assertGreaterEqual(record["duration_ms"], 0)
+        self.assertEqual(41, record["input_tokens"])
+        self.assertEqual(7, record["output_tokens"])
+        self.assertEqual(32, record["cached_tokens"])
+        text = self.log.read_text()
+        for canary in self.CANARIES:
+            self.assertNotIn(canary, text)
+
+    def test_non_tool_request_has_no_tool_telemetry(self):
+        self.post({"model": "z-ai/glm-5.2", "input": "hi"})
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        for name in ("tool_request", "duration_ms", "input_tokens", "output_tokens",
+                     "cached_tokens"):
+            self.assertNotIn(name, record)
+
+    def test_unknown_usage_shape_is_omitted_but_duration_is_kept(self):
+        self.tool_post(
+            self.completed_stream({"input_tokens": "41", "total": {"output_tokens": 7}})
+        )
+        record = self.log_records()[0]
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        for name in ("input_tokens", "output_tokens", "cached_tokens"):
+            self.assertNotIn(name, record)
+
+    def test_auth_failure_without_metadata_is_not_classified(self):
+        self.forwarder.status = 401
+        self.tool_post(
+            b'{"error":{"message":"canary-tool-output"}}', content_type="application/json"
+        )
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertEqual("forwarded", record["decision"])
+        self.assertEqual(401, record["status"])
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        self.assertNotIn("provider", record)
+        self.assertNotIn("canary-tool-output", self.log.read_text())
+
+    def test_upstream_failure_still_records_tool_request_without_body(self):
+        def explode(body, key, metadata_enabled):
+            raise OSError("canary-tool-output")
+
+        self.guard.forwarder = explode
+        self.post(
+            {
+                "model": "z-ai/glm-5.2",
+                "input": "canary-user-prompt-4412",
+                "tools": [{"type": "custom", "name": "canary_tool_name"}],
+            }
+        )
+        record = self.log_records()[0]
+        self.assertLessEqual(set(record), self.ALLOWED_KEYS)
+        self.assertEqual("upstream-error", record["decision"])
+        self.assertIs(True, record["tool_request"])
+        self.assertIn("duration_ms", record)
+        text = self.log.read_text()
+        for canary in self.CANARIES:
+            self.assertNotIn(canary, text)
 
 
 class ZdrTests(GuardTestCase):
@@ -214,7 +412,7 @@ class FailureTests(GuardTestCase):
         self.assertEqual(self.forwarder.calls, [])
 
     def test_upstream_failure_is_reported_as_502(self):
-        def explode(body, key):
+        def explode(body, key, metadata_enabled):
             raise OSError("connection reset")
 
         self.guard.forwarder = explode
@@ -226,6 +424,23 @@ class FailureTests(GuardTestCase):
         status, payload = self.post({"model": "z-ai/glm-5.2", "input": "hi"})
         self.assertEqual(status, 429)
         self.assertIn(b"rate", payload)
+
+
+class UpstreamHeaderTests(unittest.TestCase):
+    def test_router_metadata_header_is_only_added_for_tool_requests(self):
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+        with mock.patch.object(
+            guard_module.urllib.request, "urlopen", return_value=Response()
+        ) as urlopen:
+            guard_module.forward_to_openrouter(b"{}", "test-key", True)
+            enabled = urlopen.call_args.args[0]
+            guard_module.forward_to_openrouter(b"{}", "test-key", False)
+            disabled = urlopen.call_args.args[0]
+        self.assertEqual("enabled", enabled.get_header("X-openrouter-metadata"))
+        self.assertIsNone(disabled.get_header("X-openrouter-metadata"))
 
 
 class HealthTests(GuardTestCase):

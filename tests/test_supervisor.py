@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from codex_openrouter import configblock, supervisor as sup  # noqa: E402
+from codex_openrouter import configblock, supervisor as sup, toolcompat  # noqa: E402
 from codex_openrouter.app import UserPaths  # noqa: E402
 from codex_openrouter.lifecycle import LifecycleLock, LifecycleLockError  # noqa: E402
 from codex_openrouter.profile import ResolvedProfile  # noqa: E402
@@ -249,6 +250,37 @@ class UpdateFollowTests(SupervisorTestCase):
         self.assertEqual((model,), generate.call_args.kwargs["model_ids"])
         self.assertEqual(2, generate.call_count)
 
+    def test_catalog_is_regenerated_when_effective_tool_status_changes(self):
+        def fake_generate(_codex, _home, _registry, output, **_kwargs):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text('{"models": []}', encoding="utf-8")
+            return output
+
+        with (
+            mock.patch.object(sup, "stock_build_id", return_value=("26.2", "6720")),
+            mock.patch.object(sup.catalog, "generate", side_effect=fake_generate) as generate,
+        ):
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+            self.assertFalse(self.supervisor.refresh_catalog_if_needed())
+            model = self.supervisor.profile.models[0]
+            toolcompat._atomic_write(
+                self.paths.tool_compatibility,
+                {
+                    "schema_version": 1,
+                    "entries": {
+                        model: {
+                            "chatgpt_build": "6720",
+                            "tool_contract_version": toolcompat.TOOL_CONTRACT_VERSION,
+                            "status": "partial",
+                            "reason": "fixture",
+                            "verified_at": time.time(),
+                        }
+                    },
+                },
+            )
+            self.assertTrue(self.supervisor.refresh_catalog_if_needed())
+        self.assertEqual(2, generate.call_count)
+
     def test_state_survives_new_instance(self):
         with mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")), \
              mock.patch.object(sup.catalog, "generate", return_value=self.paths.composite_catalog):
@@ -296,24 +328,117 @@ class ExclusionTests(SupervisorTestCase):
 
 
 class LaunchTests(SupervisorTestCase):
-    def test_launch_never_passes_real_key_to_stock_app(self):
+    BUNDLE_IDENTIFIER = "com.example.stock-chat"
+
+    def stock_executable(self):
+        """純正app相当の最小構成。bundle idはInfo.plistから読ませる。"""
         executable = self.paths.stock_app / "Contents/MacOS/ChatGPT"
         executable.parent.mkdir(parents=True)
         executable.touch()
+        (self.paths.stock_app / "Contents/Info.plist").write_bytes(
+            sup.plistlib.dumps({"CFBundleIdentifier": self.BUNDLE_IDENTIFIER})
+        )
+        return executable
+
+    def test_launch_uses_explicit_project_flag_and_never_passes_real_key(self):
+        executable = self.stock_executable()
         self.supervisor.workspace = self.root / "workspace"
 
         with mock.patch.dict(
             sup.os.environ,
             {"OPENROUTER_API_KEY": "must-not-leak", "SAFE_VALUE": "kept"},
             clear=True,
-        ), mock.patch.object(sup.subprocess, "Popen", return_value=object()) as popen:
+        ), mock.patch.object(sup.subprocess, "Popen", return_value=object()) as popen, \
+             mock.patch.object(self.supervisor, "deliver_workspace"):
             self.supervisor.launch()
 
         arguments = popen.call_args.args[0]
         environment = popen.call_args.kwargs["env"]
-        self.assertEqual(arguments, [str(executable), str(self.supervisor.workspace)])
+        self.assertEqual(
+            arguments,
+            [str(executable), "--open-project", str(self.supervisor.workspace)],
+        )
         self.assertNotIn("OPENROUTER_API_KEY", environment)
         self.assertEqual(environment["SAFE_VALUE"], "kept")
+
+
+class WorkspaceDeliveryTests(LaunchTests):
+    """`--open-project` はbuild 6849で無視される。open document経路でも必ず渡す。"""
+
+    def run_delivery(self, returncodes, pids=(4321,)):
+        self.stock_executable()
+        completed = [mock.Mock(returncode=code) for code in returncodes]
+        with mock.patch.object(sup, "process_pids", return_value=list(pids)), \
+             mock.patch.object(sup.time, "sleep"), \
+             mock.patch.object(sup.subprocess, "run", side_effect=completed) as run:
+            self.supervisor.deliver_workspace()
+        return run
+
+    def test_workspace_is_delivered_through_the_open_document_path(self):
+        workspace = self.root / "workspace"
+        self.supervisor.workspace = workspace
+        run = self.run_delivery([0, 0])
+        for call in run.call_args_list:
+            self.assertEqual(
+                ["/usr/bin/open", "-b", self.BUNDLE_IDENTIFIER, str(workspace)],
+                call.args[0],
+            )
+        # appの復元に上書きされないよう、落ち着かせてから複数回送る。
+        self.assertEqual(sup.WORKSPACE_DELIVERY_REPEATS, run.call_count)
+
+    def test_delivery_waits_before_each_send(self):
+        """早すぎるopenはappの前回project復元に上書きされる。必ず待ってから送る。"""
+        self.supervisor.workspace = self.root / "workspace"
+        self.stock_executable()
+        with mock.patch.object(sup, "process_pids", return_value=[4321]), \
+             mock.patch.object(sup.time, "sleep") as sleep, \
+             mock.patch.object(sup.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            self.supervisor.deliver_workspace()
+        settles = [call.args[0] for call in sleep.call_args_list]
+        self.assertEqual(
+            [sup.WORKSPACE_SETTLE_SECONDS] * sup.WORKSPACE_DELIVERY_REPEATS, settles
+        )
+
+    def test_no_workspace_sends_nothing(self):
+        self.supervisor.workspace = None
+        self.stock_executable()
+        with mock.patch.object(sup.subprocess, "run") as run:
+            self.supervisor.deliver_workspace()
+        run.assert_not_called()
+
+    def test_delivery_retries_and_then_fails_closed(self):
+        self.supervisor.workspace = self.root / "workspace"
+        self.stock_executable()
+        with mock.patch.object(sup, "process_pids", return_value=[4321]), \
+             mock.patch.object(sup.time, "sleep"), \
+             mock.patch.object(sup.time, "monotonic", side_effect=[0.0, 0.0, 1.0, 999.0]), \
+             mock.patch.object(sup.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+             self.assertRaises(sup.SupervisorError):
+            self.supervisor.deliver_workspace()
+
+    def test_launch_stops_the_app_when_the_workspace_cannot_be_delivered(self):
+        self.stock_executable()
+        self.supervisor.workspace = self.root / "workspace"
+        process = mock.Mock()
+        with mock.patch.object(sup.subprocess, "Popen", return_value=process), \
+             mock.patch.object(
+                 self.supervisor, "deliver_workspace", side_effect=sup.SupervisorError("boom")
+             ), \
+             self.assertRaises(sup.SupervisorError):
+            self.supervisor.launch()
+        process.terminate.assert_called_once_with()
+
+    def test_bundle_identifier_comes_from_the_stock_app_plist(self):
+        self.stock_executable()
+        self.assertEqual(
+            self.BUNDLE_IDENTIFIER, sup.stock_bundle_identifier(self.paths.stock_app)
+        )
+
+    def test_missing_bundle_identifier_is_rejected(self):
+        self.stock_executable()
+        (self.paths.stock_app / "Contents/Info.plist").write_bytes(sup.plistlib.dumps({}))
+        with self.assertRaises(sup.SupervisorError):
+            sup.stock_bundle_identifier(self.paths.stock_app)
 
 
 class ProviderBlockTests(unittest.TestCase):
@@ -333,6 +458,15 @@ class ProviderBlockTests(unittest.TestCase):
 
 
 class ProfileRuntimeTests(SupervisorTestCase):
+    def test_unknown_build_blocks_guard_before_keychain_access(self):
+        with (
+            mock.patch.object(sup, "stock_build_id", return_value=("26.9", "7000")),
+            mock.patch.object(sup, "CredentialStore") as credential_store,
+            self.assertRaisesRegex(sup.SupervisorError, "7000"),
+        ):
+            self.supervisor.start_guard()
+        credential_store.assert_not_called()
+
     def test_custom_profile_drives_guard_watcher_and_catalog(self):
         model = "minimax/minimax-m3"
         profile = ResolvedProfile(
@@ -353,19 +487,75 @@ class ProfileRuntimeTests(SupervisorTestCase):
         watcher.assert_called_once_with(self.paths.shared_config, (model,))
 
     def test_profile_default_is_applied_once(self):
-        self.supervisor.apply_config(8791)
+        """複数model profileでは既定modelを一度だけ適用する（既存契約）。"""
+        profile = self.multi_model_profile()
+        first = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        first.apply_config(8791)
         self.assertEqual(
             configblock.read_top_level(self.config_text(), "model"),
-            self.supervisor.profile.default_model,
+            profile.default_model,
         )
-        self.supervisor.cleanup()
-        configblock.edit(
-            self.paths.shared_config,
-            lambda text: configblock.upsert_top_level(text, "model", "gpt-5.6-sol"),
-        )
-        revived = sup.Supervisor(self.paths, REGISTRY_PATH, port=0)
+        first.cleanup()
+        self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        self.assertFalse(revived.state.pending_default_model)
         revived.apply_config(49152)
         self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+
+    @staticmethod
+    def multi_model_profile() -> ResolvedProfile:
+        models = ("deepseek/deepseek-v4-flash-0731", "z-ai/glm-5.2")
+        return ResolvedProfile(
+            name="multi",
+            models=models,
+            default_model=models[0],
+            default_effort=REGISTRY[models[0]].get("default_effort"),
+            registry={model: REGISTRY[model] for model in models},
+        )
+
+
+class SingleModelSelectionTests(SupervisorTestCase):
+    """単一model profileでは、専用起動のたびにそのmodelを選び直す。"""
+
+    def prime_pending(self) -> sup.Supervisor:
+        """pending_default_modelを消化し、nativeへ戻した状態から始める。"""
+        self.supervisor.apply_config(8791)
+        self.supervisor.cleanup()
+        self.assertEqual(configblock.read_top_level(self.config_text(), "model"), "gpt-5.6-sol")
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, port=0)
+        self.assertEqual(1, len(revived.profile.models))
+        self.assertFalse(revived.state.pending_default_model)
+        return revived
+
+    def test_single_model_is_selected_even_when_pending_is_false(self):
+        revived = self.prime_pending()
+        revived.apply_config(49152)
+        text = self.config_text()
+        self.assertEqual(
+            configblock.read_top_level(text, "model"), revived.profile.default_model
+        )
+        self.assertEqual(configblock.read_top_level(text, "model_provider"), "openrouter")
+
+    def test_single_model_cleanup_restores_native_model_and_provider(self):
+        revived = self.prime_pending()
+        revived.apply_config(49152)
+        revived.cleanup()
+        text = self.config_text()
+        self.assertEqual(configblock.read_top_level(text, "model"), "gpt-5.6-sol")
+        self.assertEqual(configblock.read_top_level(text, "model_provider"), "openai")
+
+    def test_multi_model_profile_keeps_native_selection_when_pending_is_false(self):
+        profile = ProfileRuntimeTests.multi_model_profile()
+        first = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        first.apply_config(8791)
+        first.cleanup()
+        revived = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        self.assertFalse(revived.state.pending_default_model)
+        revived.apply_config(49152)
+        text = self.config_text()
+        self.assertEqual(configblock.read_top_level(text, "model"), "gpt-5.6-sol")
+        self.assertNotEqual(configblock.read_top_level(text, "model_provider"), "openrouter")
 
 
 if __name__ == "__main__":

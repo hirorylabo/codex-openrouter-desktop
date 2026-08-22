@@ -16,7 +16,7 @@ Desktopの`Codex OpenRouter.app`は小型の管理ランチャーです。開く
 ## 対象と制限
 
 - Apple Silicon macOSのみ。Windows、Linux、Intel Mac、Homebrewは未対応です。
-- `v0.2.0`はprereleaseです。ASARパッチを撤去したため、**特定buildへの固定がなくなりました**。
+- `v0.2.0`はprereleaseです。ASAR/catalogは特定buildへ固定しません。tool wireだけは壊れたcallを実行しないため、実機canary済みの**最新版＋直前build**を互換保証します。未知buildではOpenRouter起動だけを止め、純正appは通常利用できます。
 - OpenRouterモデルを選んでいる間だけ`model_provider`が切り替わります。その間、appが自前で作る背景thread（ambient suggestions等、`gpt-5.6-luna`固定）もOpenRouter側に束縛されるため、guardが遮断します。遮断された背景機能はOpenRouter利用中だけ動きません（**巻き込み**）。
 - thread途中でprovider境界をまたぐモデル変更はエラーになります。新しいthreadを立て直してください。
 - OpenRouter API利用料は利用者負担です。`doctor --network`とcandidate検査でも少量の料金が発生する場合があります。
@@ -61,13 +61,8 @@ sourceから使う場合も、Release archiveと同じallowlistを推奨しま�
 > 検出します。失うのは「鍵が漏れても課金は選択中のmodelまで」という上限で、
 > **spend limitがその役割を引き継ぎます**。Guardrailを併用しても動作します。
 
-既定profileのmodelは次の5件です。
-
-- `deepseek/deepseek-v4-flash-0731`
-- `deepseek/deepseek-v4-pro`
-- `moonshotai/kimi-k3`
-- `z-ai/glm-5.2`
-- `minimax/minimax-m3`
+既定profileは`deepseek/deepseek-v4-flash-0731`のみで、既定reasoning effortは
+`high`です。他のOpenRouterモデルは設定画面から追加できます。
 
 ## セットアップ
 
@@ -102,6 +97,7 @@ codex-openrouter migrate
 codex-openrouter profile show --json
 codex-openrouter profile apply --stdin-json
 codex-openrouter models list --json [--refresh]
+codex-openrouter models verify-tools --stdin-json
 codex-openrouter guard-log [--clear]
 codex-openrouter upgrade [--profile default|FILE] [--if-needed]
 codex-openrouter rollback
@@ -125,18 +121,27 @@ FinderでDesktopの「スタックを使用」がONの場合、launcherは「ア
 
 OpenRouterが配信しているモデルの一覧から選びます。任意slugの入力口はありません。
 
-一覧はtool callingに対応したモデルだけを候補にします（Codexはtool callingが前提のため）。列は価格（IN/OUT $/M）・公開日・7dトークン利用量・バッジで、次の並び替えと絞り込みができます。
+一覧にはtool非対応を含むOpenRouterモデルを残し、`Codex tool / provider`列で互換状態・検証providerを明示します。検証時刻とprovider試行番号はtooltipで確認できます。ほかの列は価格（IN/OUT $/M）・公開日・7dトークン利用量・バッジです。
+
+- `verified`: Tool Bridge経由でstructured functionとfreeform toolの両方を実測済み
+- `partial`: structured functionは成功、freeform toolは非互換
+- `declared`: OpenRouterが`tools`対応を公称、未実測
+- `unknown`: metadataを解釈不能
+- `unsupported`: `tools`非対応、またはdirect function callを実測できない
+
+これらはdirect structured/freeform toolだけの判定です。browser・search・Node REPLは含みません。
 
 - 並び替え: モデル名・入力価格・出力価格・公開日・7dトークン利用量の列名をクリック。同じ列を再クリックすると降順 / 昇順が切り替わります。
-- 絞り込み: モデル名検索、`ZDRのみ`（既定ON）、`学習なしのみ`、`無料のみ`、`reasoningのみ`
+- 絞り込み: モデル名検索、`ZDRのみ`（既定ON）、`学習なしのみ`、`無料のみ`、`reasoningのみ`、`tool非対応も表示（N件）`
 - 選択済みは常に先頭へ固定され、絞り込みでも消えません。
 
 **トークン利用量について。** OpenRouterが公開しているのは接続数ではなく**トークン総数**で、しかも日次トップ50モデルに限られます。圏外のモデルは`—`と表示します（0ではありません）。取得には`/api/v1/datasets/rankings-daily`を使い、1日1回だけ取得してキャッシュします。
 
 - 最低1モデルが必須です。既定モデルを外した場合は、新しい既定を明示選択するまで保存できません。
 - 「OpenRouter Guardrailを開く」でGuardrail設定画面を開けます（任意）。
-- 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認してから保存します。呼び出せないmodelがある・ネットワーク失敗・Keychain失敗では**1バイトも変更しません**。
-- 保存に成功すると「次回のOpenRouter起動から反映」と表示します。既定モデルは次の専用起動で一度だけ適用されます。
+- 「検証して保存」は選択中のmodelがAPI keyで呼び出せることを確認します。未検査の新規モデルは、少額課金の確認後に実運用と同じTool Bridge wireでstructured/freeformのcanaryを実行します。認証失敗、429、5xx、通信失敗では非対応と決めつけず、profileもtool cacheも変更しません。
+- `partial` / `unsupported`も選択できますが、`exec`・`apply_patch`などのdirect toolが動かない可能性を表示し、exact model IDの明示承認後だけ保存します。
+- 保存に成功すると「次回のOpenRouter起動から反映」と表示します。表示モデルが2件以上のprofileでは、既定モデルは次の専用起動で一度だけ適用され、以後はpickerの選択を尊重します。表示モデルが1件だけのprofileでは、選択肢が他に無いため専用起動のたびにそのモデルと`model_provider = "openrouter"`を選び直します（終了時はnative既定へ戻します）。
 - OpenRouterモード稼働中は編集できません（「ChatGPT終了後に変更できます」と表示します）。
 - 画面はAPI keyを取得も表示もしません。検証はPython CLIがKeychainから直接読み、値はUIへ渡りません。
 
@@ -169,6 +174,8 @@ ZDRなしのモデルを選ぶと確認シートが出ます。追加した場�
 
 手動で`codex-openrouter upgrade`を打つ場合は、**リポジトリの`./codex-openrouter`を使ってください。** `PATH`上の`codex-openrouter`は導入元を導入済みツリー自身へ解決するため、そのまま実行しても内容は新しくなりません（その場合は警告を表示します）。
 
+旧multi-provider開発版からのupgradeでは、OpenRouterの追加modelを維持したまま、廃止provider固有のregistry entryとmanaged provider設定を原子的に除きます。廃止providerのKeychain itemは読み出しも削除もしません。
+
 ## Profile
 
 [`models/registry.json`](./models/registry.json)は同梱の初期registryです。設定画面でmodelを足すと、選択分を実体化した導入済みregistryが`~/.local/share/codex-openrouter-desktop/state/registry.json`へ書かれ、以降はそちらが正本になります。[`profiles/default.json`](./profiles/default.json)は表示model集合と既定modelを指定します。custom profileでは正本registry掲載modelの増減だけが可能で、任意slugは拒否されます。
@@ -186,18 +193,32 @@ ZDRなしのモデルを選ぶと確認シートが出ます。追加した場�
 
 正規化した導入済みprofileはruntime stateへ保存され、picker・guard・watcher・doctorが同じ集合を参照します。並び順の出所はregistryだけで、profile側の記述順やUIの操作順は結果に影響しません。通常upgradeと起動時の自動upgradeはこのprofileを維持します。置き換えるのは明示的な`upgrade --profile default|FILE`とモデル設定画面の保存だけで、内容が変わった次の専用起動で`default_model`を一度だけ適用します。
 
-モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、次の3つを呼ぶだけです。
+モデル設定画面が使う更新窓口はCLIにもあります。Swift側はprofile・Keychain・Guardrailの判断を一切持たず、次の4つを呼ぶだけです。
 
 ```bash
 codex-openrouter profile show --json
 codex-openrouter models list --json
+printf '%s' '{"schema_version":1,"models":["deepseek/deepseek-v4-flash-0731"]}' \
+  | codex-openrouter models verify-tools --stdin-json
 printf '%s' '{"schema_version":1,"models":["minimax/minimax-m3"],"default_model":"minimax/minimax-m3"}' \
   | codex-openrouter profile apply --stdin-json
 ```
 
 `profile show`はネットワークに触らず、導入済みの選択だけを即座に返します。候補一覧は`models list`が返し、こちらはOpenRouter APIを引いて1日キャッシュします（`--refresh`でTTLを無視）。取得に失敗してもキャッシュがあれば止まりません。
 
-applyが受け付けるのは`schema_version`・`models`・`default_model`だけです。表示名・reasoning effort・並び順は変更できません。lifecycle lock内でregistry整合性と「選択中のmodelがkeyで呼び出せること」を検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。検証に落ちれば全対象が元へ戻ります。同じ選択の再保存はno-opで、既定モデルの再適用をarmしません。
+applyはこの3項目に加え、optionalな`tool_risk_acknowledged`（exact model ID配列）を受け付けます。schemaは互換追加なので1のままです。表示名・reasoning effort・並び順は変更できません。tool検査結果は`state/tool-compatibility.json`へmodel ID・ChatGPT build・tool契約versionをkeyに24時間cacheし、取得できた場合だけ検証providerと試行番号も保存します。lifecycle lock内でregistry整合性と「選択中のmodelがkeyで呼び出せること」を検証し、profile・supervisor state・install-manifest・旧catalogを単一transactionで置き換えます。検証に落ちれば全対象が元へ戻ります。
+
+OpenRouter modelのcomposite catalogは`tool_mode: "direct"`、`node_repl_disabled: true`、`supports_search_tool: false`、`experimental_supported_tools: []`を明示します。[OpenAIのmodel guidance](https://developers.openai.com/api/docs/guides/latest-model)に沿ってGPT-5.6専用のCode Mode／hosted searchを継承せず、通常のdirect tool callとして評価するためです。native modelのcatalog entryは変更しません。
+
+### 最小Tool Bridge
+
+guard内のprotocol処理は[`src/codex_openrouter/toolbridge.py`](./src/codex_openrouter/toolbridge.py)へ分離しています。通常functionはそのまま通し、namespace childとcustom toolだけをrequest内で一意なstrict functionへ変換します。`apply_patch`のstring fieldは`patch`、それ以外のcustomは`input`です。OpenRouterのSSEは`call_id`・`item_id`・`output_index`を保ったまま元のnamespace/custom eventへ復元します。未知tool名、不完全JSON、欠落delta/done、途中切断は推測修復せずfail-closedです。
+
+toolを含むrequestでは価格sortを指定せず、既定の[Auto Exacto](https://openrouter.ai/docs/guides/routing/auto-exacto)を利用します。併せて`X-OpenRouter-Metadata: enabled`を送り、最終chunkからprovider・試行番号・候補数・statusだけをguard logへ残します。`openrouter_metadata`本体、pipeline、prompt、tool argumentsはCodexにもlogにも残しません。cache hitや認証・rate limit・5xxでmetadataが無いことはtool非対応判定に使いません。
+
+toolを含むupstream requestには、これに加えて`tool_request`・`duration_ms`と、responseが申告した整数の`input_tokens`・`output_tokens`・`cached_tokens`だけを残します。`duration_ms`は上流へ投げてから応答を流し終えるまでの経過時間で、prompt・tool名・argumentsに依存しません。非整数や未知shapeのusageは読み替えず省略し、合計や差分の再計算もしません。
+
+`codex-relay`はruntime依存ではありません。参照commit、参照file hash、採用・不採用の境界は[`UPSTREAMS.md`](./UPSTREAMS.md)に固定し、週次CIは差分を報告するだけで自動mergeしません。
 
 同梱registryに無いmodelを選ぶと、`models list`のエントリから導入済みregistry（`~/.local/share/codex-openrouter-desktop/state/registry.json`）を実体化し、**同じtransactionへ載せます**。片方だけ進むと「選んだmodelがregistryに無い」状態で次の起動に入るためです。registryのエントリはライブAPIから毎回導出し直し、同梱registryが持つ日本語の説明文だけを残します。
 
@@ -227,7 +248,7 @@ codex-openrouter guard-log
 
 guardが中継したmodelと遮断したmodelを集計します。遮断側に出るのが巻き込みです。Codexの更新で背景機能が増減するので、更新後にこれを見てください。現時点で判明しているのは`gpt-5.6-luna`（ambient suggestionsとその安全性分類）です。
 
-guardは許可集合（[`models/registry.json`](./models/registry.json)の5モデル）以外を**1バイトも外へ出さずに**400で止めます。guard logにはmodel・判定・バイト数・時刻だけを記録し、本文と鍵は残しません。
+guardは許可集合（[`models/registry.json`](./models/registry.json)の5モデル）以外を**1バイトも外へ出さずに**400で止めます。guard logにはmodel・判定・バイト数・時刻と、tool requestのrouter集計値・所要時間・token数だけを記録し、本文と鍵は残しません。
 
 ## 価格表示
 
@@ -244,19 +265,29 @@ codex-openrouter auth logout
 ## 開発
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v --buffer
+PYTHONPATH=src python3 scripts/run_unit_tests.py
 PYTHONPATH=src python3 -m compileall -q src portable scripts
 PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
+uvx ruff@0.16.3 check .
 xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
+xcrun swiftc -parse-as-library \
+  portable/launcher/app/ProfileBridge.swift \
+  portable/tests/DecoderCompatTests.swift -o /tmp/decoder-compat && /tmp/decoder-compat
 python3 scripts/secret_scan.py --tree .
+python3 scripts/check_upstreams.py --validate-only
 python3 scripts/build_release.py "v$(cat VERSION)" --dist /tmp/codex-openrouter-dist
 ```
 
-実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。
+`compileall`は構文だけを確認します。未定義名（`F821`）を止めるのは`ruff`です。
+unit test runnerはloopback以外のsocket接続を遮断し、差し替え漏れによる実通信を失敗にします。
+CLIのJSON fieldを増減したら`tests/fixtures/launcher-*.json`とdecoder compatを同時に更新してください。
+
+実ChatGPT.appを使う手動検証は、隔離homeのE2Eを先に実行し、導入済みruntimeをupgradeした後でlauncherを2 cycle確認します。後者は各cycleでChatGPT.appを通常終了する対話操作を含みます。空のworkspaceを引数に渡した場合、cycle 1は新しく開いたchatで5 gatesを実行します。`pwd`・`apply_patch`・namespace childを各1回、続けて先行するread結果を次のcallへ使う依存2-call turnと、互いに独立したread-only commandを2件呼ぶparallel turnです。JSONLのexact cwd・tool・arguments・output・最終回答を監査し、parallel gateだけは順序に依存せず集合で比較します。依存gateが読む値はharnessが生成してworkspaceへ置き、GUIへ送るpromptには一度も出しません。既存chatをresumeすると保存済みcwdが優先されるため、監査はそこで停止し、cycle 2を起動しません。`--open-project`は現行ChatGPT buildの内部契約であり、最終判定には使いません。
 
 ```bash
 PYTHONPATH=src python3 scripts/macos_live_e2e.py
 scripts/macos_installed_e2e.zsh
+scripts/macos_installed_e2e.zsh /private/tmp/codex-openrouter-e2e.EMPTY
 ```
 
 セキュリティ報告は[`SECURITY.md`](./SECURITY.md)、第三者コードは[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)を参照してください。

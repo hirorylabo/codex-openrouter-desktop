@@ -96,12 +96,22 @@ final class LauncherPanel: NSObject, NSWindowDelegate {
         let zdrLess = snapshot.available
             .filter { $0.zdrSupported == false && snapshot.profile.models.contains($0.id) }
             .count
+        let toolRisk = snapshot.available
+            .filter {
+                ["partial", "unsupported"].contains($0.toolSupport ?? "")
+                    && snapshot.profile.models.contains($0.id)
+            }
+            .count
         if !snapshot.editable {
             noticeLabel.stringValue = "OpenRouterモードが実行中です。ChatGPT終了後に変更できます。"
             noticeLabel.textColor = .secondaryLabelColor
         } else if zdrLess > 0 {
             noticeLabel.stringValue = "ZDRなしのモデルを\(zdrLess)件使用中です。"
                 + "そのモデルへ送った内容はproviderに保持される可能性があります。"
+            noticeLabel.textColor = .systemOrange
+        } else if toolRisk > 0 {
+            noticeLabel.stringValue = "Codex tool互換が不完全なモデルを\(toolRisk)件使用中です。"
+                + "exec・apply_patchなどのdirect toolが動かない可能性があります。"
             noticeLabel.textColor = .systemOrange
         } else {
             noticeLabel.stringValue = ""

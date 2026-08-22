@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -20,13 +21,13 @@ from .auth import (
 from . import configblock
 from .install import InstallError, _install_unlocked
 from .lifecycle import LifecycleLock, LifecycleLockError
-from . import modelcatalog
+from . import modelcatalog, toolbridge, toolcompat
 from .openrouter import OpenRouterError, validate_key_and_profile
 from .processes import ProcessError, process_pids
-from .profile import ProfileError, ResolvedProfile, installed_profile
+from .profile import ProfileError, ResolvedProfile, active_registry, installed_profile
 from .promotion import PromotionError, atomic_promote, rollback_replacements
 from . import settings
-from .supervisor import Supervisor, SupervisorError
+from .supervisor import State, Supervisor, SupervisorError
 from .upgrade import UpgradeError, auto_upgrade, upgrade
 
 
@@ -78,6 +79,13 @@ def check_command(args: argparse.Namespace) -> int:
     selected, profile = resolved_profile(args.profile, paths)
     print("architecture=arm64")
     print(f"ChatGPT={version} build {build}  (純正appは変更しません)")
+    try:
+        toolbridge.assert_supported_build(root() / "models/tool-wire-builds.json", build)
+    except toolbridge.ToolBridgeError as exc:
+        print(f"tool_wire=waiting ({exc})")
+        print("CHECK: FAIL (OpenRouter互換確認待ち。純正ChatGPT.appは利用可能です)")
+        return 1
+    print(f"tool_wire=compatible contract={toolbridge.TOOL_CONTRACT_VERSION}")
     print(f"profile={selected} models={len(profile.models)} default={profile.default_model}")
     print(f"shared_home={paths.shared_home}")
     config = paths.shared_config
@@ -336,6 +344,25 @@ def profile_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_tools_payload(raw: str) -> list[str]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"verify-toolsの入力がJSONではありません: {exc}") from exc
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "models"}:
+        raise CliError("verify-toolsはschema_versionとmodelsだけを受け付けます")
+    models = payload.get("models")
+    if (
+        payload.get("schema_version") != 1
+        or not isinstance(models, list)
+        or not models
+        or not all(isinstance(model, str) and model for model in models)
+        or len(models) != len(set(models))
+    ):
+        raise CliError("verify-toolsのmodelsは重複のないmodel ID配列で指定してください")
+    return models
+
+
 def models_command(args: argparse.Namespace) -> int:
     """設定画面へ出す候補一覧。秘密値は含まない。
 
@@ -343,7 +370,13 @@ def models_command(args: argparse.Namespace) -> int:
     それだけで、しかも日次トップ50に限られる。圏外のmodelは値を持たない。
     """
     paths = UserPaths.current()
-    registry = json.loads((root() / "models/registry.json").read_text(encoding="utf-8"))
+    registry_path = root() / "models/registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    requested = (
+        _verify_tools_payload(sys.stdin.read())
+        if args.models_action == "verify-tools"
+        else None
+    )
 
     key = None
     try:
@@ -351,7 +384,57 @@ def models_command(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - 鍵が無くても候補一覧は出す
         key = None
 
-    document = modelcatalog.load(paths, registry, key=key, refresh=args.refresh)
+    document = modelcatalog.load(
+        paths,
+        registry,
+        key=key,
+        refresh=getattr(args, "refresh", False),
+    )
+    _version, build = stock_build_id(paths.stock_app)
+    if args.models_action == "list":
+        document = {
+            **document,
+            "models": toolcompat.annotate_models(
+                document["models"], paths.tool_compatibility, build
+            ),
+        }
+        print(json.dumps(document, ensure_ascii=False, indent=2))
+        return 0
+
+    assert requested is not None
+    specs = {row["id"]: row for row in document["models"]}
+    with LifecycleLock(paths):
+        installed = json.loads(
+            active_registry(registry_path, paths).read_text(encoding="utf-8")
+        )["models"]
+        for model, spec in installed.items():
+            specs.setdefault(model, spec)
+        key = CredentialStore(paths.credential_helper).get()
+        before = (
+            paths.tool_compatibility.read_bytes()
+            if paths.tool_compatibility.is_file()
+            else None
+        )
+        results = toolcompat.verify_models(
+            requested,
+            specs,
+            key=key,
+            build=build,
+            cache_path=paths.tool_compatibility,
+        )
+        after = (
+            paths.tool_compatibility.read_bytes()
+            if paths.tool_compatibility.is_file()
+            else None
+        )
+        if after != before:
+            state = State.load(paths.supervisor_state)
+            replace(
+                state,
+                catalog_profile_digest=None,
+                catalog_tool_digest=None,
+            ).save(paths.supervisor_state)
+    document = {"schema_version": 1, "results": results}
     print(json.dumps(document, ensure_ascii=False, indent=2))
     return 0
 
@@ -458,6 +541,9 @@ def build_parser() -> argparse.ArgumentParser:
     models_list.add_argument("--json", action="store_true", required=True)
     models_list.add_argument("--refresh", action="store_true")
     models_list.set_defaults(func=models_command)
+    models_verify = models_actions.add_parser("verify-tools")
+    models_verify.add_argument("--stdin-json", action="store_true", required=True)
+    models_verify.set_defaults(func=models_command)
 
     guard_log = subcommands.add_parser("guard-log")
     guard_log.add_argument("--clear", action="store_true")
@@ -494,6 +580,8 @@ def main(argv: list[str] | None = None) -> int:
         AppError,
         AuthenticationError,
         modelcatalog.CatalogError,
+        toolcompat.ToolCompatibilityError,
+        toolbridge.ToolBridgeError,
         configblock.ConfigBlockError,
         InstallError,
         LifecycleLockError,

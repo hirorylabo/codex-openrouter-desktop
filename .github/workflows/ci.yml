@@ -23,9 +23,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Python tests
-        run: PYTHONPATH=src python3 -m unittest discover -s tests -v --buffer
+        run: PYTHONPATH=src python3 scripts/run_unit_tests.py
       - name: Python syntax
         run: python3 -m compileall -q src portable scripts
+      - name: Validate upstream reference manifest
+        run: python3 scripts/check_upstreams.py --validate-only
 
   lint:
     runs-on: ubuntu-latest
@@ -69,10 +71,19 @@ jobs:
           xcrun swiftc portable/launcher/app/*.swift -o /tmp/CodexOpenRouterLauncher
           portable/launcher/build_icon.zsh portable/launcher/CreateLauncherIcon.swift /tmp/AppIcon.icns
           test -s /tmp/AppIcon.icns
+      - name: Launcher decoder compatibility
+        run: |
+          xcrun swiftc -parse-as-library \
+            portable/launcher/app/ProfileBridge.swift \
+            portable/tests/DecoderCompatTests.swift \
+            -o /tmp/decoder-compat
+          /tmp/decoder-compat
+
       - name: Parse zsh entry points
         run: |
           zsh -n portable/templates/codex-openrouter-app.zsh.in
           zsh -n portable/launcher/build_icon.zsh
+          zsh -n scripts/macos_installed_e2e.zsh
       - name: Synthetic upgrade, promotion, and rollback E2E
         run: PYTHONPATH=src python3 scripts/macos_synthetic_e2e.py
 

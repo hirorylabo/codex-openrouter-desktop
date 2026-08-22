@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
 import urllib.request
 
+from . import toolbridge
+
 ENDPOINT = "https://openrouter.ai/api/v1/responses"
 HEALTH_PATH = "/__guard/health"
 MAX_BODY_BYTES = 64 * 1024 * 1024
@@ -48,17 +50,25 @@ def deny_payload(model: str | None) -> bytes:
     ).encode("utf-8")
 
 
-def forward_to_openrouter(body: bytes, key: str, timeout: float = 300.0):
+def forward_to_openrouter(
+    body: bytes,
+    key: str,
+    metadata_enabled: bool = False,
+    timeout: float = 300.0,
+):
     """OpenRouterへ中継し、(status, headers, 読み出し可能なstream) を返す。"""
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    if metadata_enabled:
+        headers["X-OpenRouter-Metadata"] = "enabled"
     request = urllib.request.Request(
         ENDPOINT,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
+        headers=headers,
     )
     try:
         response = urllib.request.urlopen(request, timeout=timeout)
@@ -75,7 +85,7 @@ class Guard:
         allowed_models: Iterable[str],
         key_provider: Callable[[], str],
         log_path: Path | None = None,
-        forwarder: Callable[[bytes, str], tuple[int, dict, object]] = forward_to_openrouter,
+        forwarder: Callable[[bytes, str, bool], tuple[int, dict, object]] = forward_to_openrouter,
         nonce: str = "",
         access_token: str = "",
         zdr_models: Iterable[str] | None = None,
@@ -113,20 +123,41 @@ class Guard:
         registryが `zdr_supported: false` と記録したmodelでは立てない。
         その判断はここではなくregistryとdoctorの側にあり、guardは従うだけにする。
         """
+        return self.prepare_request(body).encode()
+
+    def prepare_request(self, body: bytes) -> toolbridge.PreparedRequest:
+        """tool契約を平坦化し、ZDRだけを追加したrequestと復元表を返す。"""
         try:
             document = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return body
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise toolbridge.ToolBridgeError("request本文が有効なJSONではありません") from exc
         if not isinstance(document, dict):
-            return body
+            raise toolbridge.ToolBridgeError("request本文はJSON objectである必要があります")
+        prepared = toolbridge.prepare_document(document)
+        document = prepared.document
         if document.get("model") not in self.zdr:
-            return body
+            return prepared
         provider = document.get("provider")
         if not isinstance(provider, dict):
             provider = {}
         provider["zdr"] = True
         document["provider"] = provider
-        return json.dumps(document).encode("utf-8")
+        return toolbridge.PreparedRequest(document, prepared.tool_map)
+
+
+def tool_telemetry(tool_map: toolbridge.ToolMap, started: float) -> dict[str, object]:
+    """toolを含むupstream requestにだけ足す、本文を持たない集計値。
+
+    `duration_ms` は上流へ投げてから応答を流し終えるまでの経過時間で、
+    prompt・tool名・argumentsのどれにも依存しない。tool以外のrequestには
+    何も足さない。
+    """
+    if not tool_map.has_tools:
+        return {}
+    return {
+        "tool_request": True,
+        "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+    }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -183,23 +214,74 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            prepared = self.guard.prepare_request(body)
+        except toolbridge.ToolBridgeError:
+            self.guard.record(model=model, decision="bridge-denied", bytes=len(body))
+            self._send(
+                400,
+                b'{"error":{"code":"tool_bridge_error","message":"unsupported Codex tool wire"}}',
+                "application/json",
+            )
+            return
+
+        try:
             key = self.guard.key_provider()
         except Exception:
             self.guard.record(model=model, decision="key-error", bytes=len(body))
             self._send(503, b'{"error":{"message":"credential unavailable"}}', "application/json")
             return
 
+        started = time.monotonic()
         try:
-            status, headers, stream = self.guard.forwarder(self.guard.prepare(body), key)
+            status, headers, stream = self.guard.forwarder(
+                prepared.encode(), key, prepared.tool_map.has_tools
+            )
         except Exception:
-            self.guard.record(model=model, decision="upstream-error", bytes=len(body))
+            self.guard.record(
+                model=model,
+                decision="upstream-error",
+                bytes=len(body),
+                **tool_telemetry(prepared.tool_map, started),
+            )
             self._send(502, b'{"error":{"message":"upstream failed"}}', "application/json")
             return
 
-        self.guard.record(model=model, decision="forwarded", bytes=len(body), status=status)
-        self._relay(status, headers, stream)
-
-    def _relay(self, status: int, headers: dict, stream) -> None:
+        try:
+            self._relay(
+                status,
+                headers,
+                stream,
+                prepared.tool_map,
+                lambda summary, usage: self.guard.record(
+                    model=model,
+                    decision="forwarded",
+                    bytes=len(body),
+                    status=status,
+                    **tool_telemetry(prepared.tool_map, started),
+                    **(summary.log_fields() if summary is not None else {}),
+                    **(usage.log_fields() if usage is not None else {}),
+                ),
+            )
+        except toolbridge.ToolBridgeError:
+            self.guard.record(
+                model=model,
+                decision="bridge-error",
+                bytes=len(body),
+                status=status,
+                **tool_telemetry(prepared.tool_map, started),
+            )
+            self.close_connection = True
+            return
+    def _relay(
+        self,
+        status: int,
+        headers: dict,
+        stream,
+        tool_map: toolbridge.ToolMap,
+        on_complete: Callable[
+            [toolbridge.RouterSummary | None, toolbridge.UsageSummary | None], None
+        ],
+    ) -> toolbridge.RouterSummary | None:
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -211,15 +293,52 @@ class _Handler(BaseHTTPRequestHandler):
         # でしか届かず、短いturnは完了まで無反応になる。1回の下位読み出し分だけ
         # 返す read1 を使う。forwarder は差し替え可能なので非対応なら read へ倒す。
         read_chunk = getattr(stream, "read1", None) or stream.read
+        completed = False
+        bridge = (
+            toolbridge.SSEBridge(tool_map)
+            if tool_map.has_tools and "text/event-stream" in content_type.lower()
+            else None
+        )
+        json_buffer = bytearray()
         try:
             while True:
                 chunk = read_chunk(8192)
                 if not chunk:
                     break
-                self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
-                self.wfile.write(chunk)
-                self.wfile.write(b"\r\n")
+                if bridge is not None:
+                    for transformed in bridge.feed(chunk):
+                        self._write_chunk(transformed)
+                elif tool_map.has_tools and "application/json" in content_type.lower():
+                    json_buffer.extend(chunk)
+                else:
+                    self._write_chunk(chunk)
+            if bridge is not None:
+                for transformed in bridge.finish():
+                    self._write_chunk(transformed)
+            elif tool_map.has_tools and "application/json" in content_type.lower():
+                if not json_buffer:
+                    raise toolbridge.ToolBridgeError(
+                        "OpenRouterのJSON responseが空です"
+                    )
+                try:
+                    document = json.loads(json_buffer)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise toolbridge.ToolBridgeError(
+                        "OpenRouterのJSON responseが不正です"
+                    ) from exc
+                if not isinstance(document, dict):
+                    raise toolbridge.ToolBridgeError("OpenRouter responseがobjectではありません")
+                usage = toolbridge.extract_usage(document)
+                transformed, summary = toolbridge.transform_response_document(document, tool_map)
+                self._write_chunk(json.dumps(transformed, ensure_ascii=False).encode("utf-8"))
+                on_complete(summary, usage)
+                completed = True
+                self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
+                return summary
+            summary = bridge.summary if bridge is not None else None
+            on_complete(summary, bridge.usage if bridge is not None else None)
+            completed = True
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -228,6 +347,17 @@ class _Handler(BaseHTTPRequestHandler):
             close = getattr(stream, "close", None)
             if close is not None:
                 close()
+            if not completed:
+                self.close_connection = True
+        return bridge.summary if bridge is not None else None
+
+    def _write_chunk(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+        self.wfile.write(chunk)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
 
 class _Server(ThreadingHTTPServer):

@@ -24,6 +24,7 @@ FILES = (
     "LICENSE",
     "README.md",
     "README.en.md",
+    "UPSTREAMS.md",
     "SECURITY.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",

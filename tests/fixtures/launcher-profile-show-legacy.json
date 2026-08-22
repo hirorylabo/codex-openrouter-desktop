@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "profile": {
+    "schema_version": 1,
+    "name": "default",
+    "models": ["deepseek/deepseek-v4-flash-0731"],
+    "default_model": "deepseek/deepseek-v4-flash-0731",
+    "default_effort": "high",
+    "digest": "fixture"
+  },
+  "available": [
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "display_name": "DeepSeek V4 Flash 0731",
+      "capability": "agentic coding",
+      "efforts": ["low", "high", "max"],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "zdr_supported": true
+    }
+  ],
+  "openrouter_active": false,
+  "editable": true,
+  "workspace": "/Users/example/Documents",
+  "guardrail_url": "https://openrouter.ai/settings/guardrails"
+}

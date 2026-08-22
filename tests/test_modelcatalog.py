@@ -84,7 +84,7 @@ class FilterTests(unittest.TestCase):
         self.document = build()
         self.rows = {row["id"]: row for row in self.document["models"]}
 
-    def test_models_without_tool_calling_are_not_candidates(self) -> None:
+    def test_models_without_tool_calling_remain_visible_as_unsupported(self) -> None:
         document = build(
             models_document={
                 "data": [
@@ -102,7 +102,17 @@ class FilterTests(unittest.TestCase):
             },
             zdr_document={"data": []},
         )
-        self.assertEqual(document["models"], [])
+        self.assertEqual(len(document["models"]), 1)
+        row = document["models"][0]
+        self.assertEqual(row["tool_support"], "unsupported")
+        self.assertIn("tools", row["tool_support_reason"])
+
+    def test_unreadable_tool_metadata_remains_visible_as_unknown(self) -> None:
+        model = json.loads(json.dumps(_fixture("models")["data"][0]))
+        model["id"] = "vendor/unknown-tools"
+        model["supported_parameters"] = {"tools": True}
+        document = build(models_document={"data": [model]})
+        self.assertEqual(document["models"][0]["tool_support"], "unknown")
 
     def test_zdr_capability_does_not_depend_on_being_able_to_price_it(self) -> None:
         """cache価格を出さないZDR providerでも、ZDRで動けることは変わらない。
@@ -227,6 +237,16 @@ class CacheTests(unittest.TestCase):
     def test_cache_from_an_older_schema_is_ignored(self) -> None:
         self.paths.catalog_cache.write_text(
             json.dumps({"schema_version": 0, "models": []}), encoding="utf-8"
+        )
+        self.assertIsNone(modelcatalog.read_cache(self.paths.catalog_cache))
+
+    def test_multi_router_cache_is_ignored_after_orcarouter_removal(self) -> None:
+        self.paths.catalog_cache.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "models": [{"id": "orca/vendor/model", "router": "orcarouter"}],
+            }),
+            encoding="utf-8",
         )
         self.assertIsNone(modelcatalog.read_cache(self.paths.catalog_cache))
 

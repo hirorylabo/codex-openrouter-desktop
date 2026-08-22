@@ -79,7 +79,11 @@ class RepositoryTests(unittest.TestCase):
         registry = json.loads((ROOT / "models/registry.json").read_text(encoding="utf-8"))
         profile = json.loads((ROOT / "profiles/default.json").read_text(encoding="utf-8"))
         self.assertEqual(1, registry["schema_version"])
-        self.assertEqual(set(profile["models"]), set(registry["models"]))
+        self.assertTrue(set(profile["models"]) <= set(registry["models"]))
+        self.assertEqual(
+            ["deepseek/deepseek-v4-flash-0731"], profile["models"]
+        )
+        self.assertEqual("deepseek/deepseek-v4-flash-0731", profile["default_model"])
         self.assertTrue(
             registry["models"]["deepseek/deepseek-v4-flash-0731"][
                 "supports_parallel_tool_calls"
@@ -93,6 +97,26 @@ class RepositoryTests(unittest.TestCase):
             ["text", "image"],
             registry["models"]["moonshotai/kimi-k3"]["codex_modalities"],
         )
+
+    def test_orcarouter_is_absent_from_operational_sources(self) -> None:
+        targets = [
+            ROOT / "src",
+            ROOT / "portable",
+            ROOT / "models",
+            ROOT / "profiles",
+            ROOT / "README.md",
+            ROOT / "README.en.md",
+        ]
+        found: list[str] = []
+        for target in targets:
+            paths = [target] if target.is_file() else target.rglob("*")
+            for path in paths:
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                if "orcarouter" in text or "orca/" in text:
+                    found.append(str(path.relative_to(ROOT)))
+        self.assertEqual([], found)
 
     def test_network_request_pins_active_zdr_provider_tags(self) -> None:
         class Response:
@@ -262,6 +286,25 @@ class RepositoryTests(unittest.TestCase):
         ]
         self.assertEqual(["main.swift"], top_level)
 
+    def test_ci_parses_every_zsh_entry_point(self) -> None:
+        """CIがrepo内の全zsh scriptを構文検査すること。
+
+        `zsh -n` の対象をfile名で列挙しているため、scriptが増えても黙って漏れる。
+        実際 `scripts/macos_installed_e2e.zsh` は列挙から漏れており、zsh固有の
+        read-only parameter衝突はCIでは止まらなかった。
+        """
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        parsed = set(re.findall(r"zsh -n (\S+)", workflow))
+        excluded = {".git", ".generated", "dist", "node_modules", ".test-output", "__pycache__"}
+        present = {
+            str(path.relative_to(ROOT))
+            for pattern in ("*.zsh", "*.zsh.in")
+            for path in ROOT.glob(f"**/{pattern}")
+            if not excluded & set(path.relative_to(ROOT).parts)
+        }
+        self.assertTrue(present)
+        self.assertEqual(set(), present - parsed)
+
     def test_launcher_is_a_regular_app_with_a_settings_entry(self) -> None:
         """管理ランチャーはDockとAppメニューを持つ通常app。常駐daemonにはしない。"""
         info = (ROOT / "portable/launcher/Info.plist").read_text(encoding="utf-8")
@@ -316,6 +359,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("let defaultModel = resolvedDefault", swift)
         # 既定を外したら黙って他へ寄せない。
         self.assertIn("defaultModel = nil", swift)
+
+    def test_tool_status_is_scoped_to_direct_tools(self) -> None:
+        """verifiedを、無効化しているbrowser/searchまでの保証に見せない。"""
+        swift = launcher_swift()
+        self.assertIn("browser・search・Node REPLは検証対象外", swift)
+        self.assertNotIn("exec・browser・search・apply_patch", swift)
 
     def test_adding_a_non_zdr_model_is_confirmed_rather_than_silent(self) -> None:
         """ZDRなしの追加は既定の安全性を下げる。黙って通す経路を作らない。
@@ -390,6 +439,38 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("profile show --json", source)
         self.assertIn("OpenRouterで起動", source)
         self.assertIn("manual_checklist", source)
+        # cycle 1のtool監査が終わるまでcycle 2へ進まない。
+        self.assertIn("run_tool_gates", source)
+        self.assertIn("wait_gate pwd", source)
+        self.assertIn("wait_gate apply-patch", source)
+        self.assertIn("wait_gate namespace", source)
+        self.assertIn("stock_running || fail", source)
+        # zshのread-only特殊parameter `status`をlocal変数に使わない。
+        self.assertIn("local output audit_status", source)
+        self.assertIn("audit_status=$?", source)
+        self.assertNotIn("local output status", source)
+        execution = [
+            source.rfind("run_cycle 1\n"),
+            source.rfind("cleanup_probe\n"),
+            source.rfind("run_cycle 2\n"),
+            source.rfind("check_keychain_status\n"),
+        ]
+        self.assertEqual(sorted(execution), execution)
+
+    def test_installed_e2e_can_fail_closed_on_an_exact_empty_workspace(self) -> None:
+        """実機tool試験はexact bundle/workspaceを固定し、open失敗を迂回しない。"""
+        source = (ROOT / "scripts/macos_installed_e2e.zsh").read_text(encoding="utf-8")
+        self.assertIn('LAUNCHER_BUNDLE_ID="local.codex.openrouter.launcher"', source)
+        self.assertIn('E2E_WORKSPACE="${1:-}"', source)
+        self.assertIn('/usr/bin/open -b "$LAUNCHER_BUNDLE_ID" "$E2E_WORKSPACE"', source)
+        self.assertIn('AUDITOR="$SCRIPT_DIR/macos_installed_e2e_audit.py"', source)
+        self.assertIn("--started-after", source)
+        self.assertIn("require_empty_workspace", source)
+        self.assertNotIn("EPOCHSECONDS", source)
+        self.assertIn("自動retry・別経路fallback禁止", source)
+        self.assertNotIn("print_workspace_gate", source)
+        self.assertNotIn("/usr/bin/lsappinfo info -only WindowList", source)
+        self.assertNotIn('|| /usr/bin/open "$LAUNCHER"', source)
 
     def test_live_e2e_removes_auth_copy_even_when_cleanup_raises(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

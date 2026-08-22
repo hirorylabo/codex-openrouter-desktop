@@ -15,6 +15,7 @@ from codex_openrouter import openrouter
 from codex_openrouter.profile import ResolvedProfile
 from codex_openrouter.profile import (
     ProfileError,
+    active_registry,
     parse_apply_payload,
     resolve_apply_payload,
     resolve_profile,
@@ -35,8 +36,9 @@ class ProfileTests(unittest.TestCase):
 
     def test_default_profile_resolves_exact_registry_subset(self) -> None:
         profile = resolve_profile(REGISTRY, ROOT / "profiles/default.json")
-        self.assertEqual(5, len(profile.models))
-        self.assertEqual("deepseek/deepseek-v4-pro", profile.default_model)
+        self.assertEqual(("deepseek/deepseek-v4-flash-0731",), profile.models)
+        self.assertEqual("deepseek/deepseek-v4-flash-0731", profile.default_model)
+        self.assertEqual("high", profile.default_effort)
         self.assertEqual(set(profile.models), set(profile.registry))
 
     def test_custom_profile_can_use_verified_subset(self) -> None:
@@ -80,6 +82,22 @@ class ProfileTests(unittest.TestCase):
                 ),
             )
 
+    def test_retired_provider_registry_is_not_used_before_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            installed = Path(temporary) / "registry.json"
+            installed.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "vendor/model": {"router": "retired-provider"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = SimpleNamespace(installed_registry=installed)
+            self.assertEqual(REGISTRY, active_registry(REGISTRY, paths))
+
     def test_model_order_is_normalised_to_the_registry(self) -> None:
         """並び順の出所はregistryだけ。同じ選択なら常に同じdigestになる。"""
         registry_order = list(
@@ -98,10 +116,15 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(registry_order, list(profile.models))
         self.assertEqual(registry_order, list(profile.registry))
 
-    def test_apply_payload_only_accepts_the_three_editable_fields(self) -> None:
+    def test_apply_payload_accepts_only_selection_and_optional_exact_tool_ack(self) -> None:
         model = "minimax/minimax-m3"
         accepted = parse_apply_payload(
-            json.dumps({"schema_version": 1, "models": [model], "default_model": model})
+            json.dumps({
+                "schema_version": 1,
+                "models": [model],
+                "default_model": model,
+                "tool_risk_acknowledged": [model],
+            })
         )
         resolved = resolve_apply_payload(REGISTRY, accepted, name="keep-me")
         self.assertEqual("keep-me", resolved.name)
@@ -109,6 +132,7 @@ class ProfileTests(unittest.TestCase):
         for rejected in (
             {"schema_version": 1, "models": [model], "default_model": model, "name": "偽名"},
             {"schema_version": 1, "models": [model], "default_model": model, "default_effort": "max"},
+            {"schema_version": 1, "models": [model], "default_model": model, "tool_risk_acknowledged": model},
             [model],
         ):
             with self.subTest(rejected=rejected), self.assertRaises(ProfileError):

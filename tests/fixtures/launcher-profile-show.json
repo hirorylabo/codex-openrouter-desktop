@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": {
+    "schema_version": 1,
+    "name": "default",
+    "models": ["deepseek/deepseek-v4-flash-0731"],
+    "default_model": "deepseek/deepseek-v4-flash-0731",
+    "default_effort": "high",
+    "digest": "fixture"
+  },
+  "available": [
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "display_name": "DeepSeek V4 Flash 0731",
+      "capability": "agentic coding",
+      "efforts": ["low", "high", "max"],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "zdr_supported": true,
+      "tool_support": "partial",
+      "tool_support_reason": "structured functionは成功、freeform toolは非互換",
+      "tool_verified_at": 1787140000.0,
+      "tool_provider": "DeepInfra",
+      "tool_provider_attempt": 1,
+      "tool_contract_version": 2
+    }
+  ],
+  "openrouter_active": false,
+  "editable": true,
+  "workspace": "/Users/example/Documents",
+  "guardrail_url": "https://openrouter.ai/settings/guardrails"
+}

@@ -17,12 +17,21 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import plistlib
 import secrets
 import signal
 import subprocess
 import threading
+import time
 
-from . import catalog, configblock, guard as guard_module, watcher as watcher_module
+from . import (
+    catalog,
+    configblock,
+    guard as guard_module,
+    toolbridge,
+    toolcompat,
+    watcher as watcher_module,
+)
 from .app import AppError, UserPaths, stock_build_id
 from .auth import CredentialStore
 from .lifecycle import LifecycleLock
@@ -31,12 +40,30 @@ from .profile import ResolvedProfile, active_registry, installed_profile
 
 CATALOG_BLOCK = "catalog"
 PROVIDER_BLOCK = "provider"
+# 起動直後のappがopen document eventを受け取れるまで待つ上限。無限には待たない。
+WORKSPACE_DELIVERY_SECONDS = 45
+# appは起動後に前回のprojectを非同期で復元する。早すぎるopenはその復元に
+# 上書きされるため、落ち着くのを待ってから送り、最後のeventを勝たせる。
+WORKSPACE_SETTLE_SECONDS = 5
+WORKSPACE_DELIVERY_REPEATS = 2
 NATIVE_FALLBACK_MODEL = "gpt-5.6-sol"
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def stock_bundle_identifier(stock_app: Path) -> str:
+    """純正appのbundle id。値をハードコードせずInfo.plistから読む。"""
+    try:
+        document = plistlib.loads((stock_app / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise SupervisorError(f"公式ChatGPT.appのInfo.plistを読めません: {stock_app}") from exc
+    identifier = document.get("CFBundleIdentifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise SupervisorError(f"公式ChatGPT.appのbundle idを取得できません: {stock_app}")
+    return identifier
 
 
 @dataclass
@@ -56,6 +83,7 @@ class State:
     # 現在のcatalogがどのprofileから作られたか。build更新だけでなくprofile変更でも
     # 組み直すために持つ。
     catalog_profile_digest: str | None = None
+    catalog_tool_digest: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "State":
@@ -115,6 +143,7 @@ class Supervisor:
         workspace: Path | None = None,
     ):
         self.paths = paths
+        self.tool_wire_builds = registry_path.parent / "tool-wire-builds.json"
         # 正本は導入済みregistryがあればそちら。同梱registryのまま読むと、
         # 設定画面で足したmodelがcatalog生成でKeyErrorになり、shutdown時の
         # native復帰でも「OpenRouterのmodelだと気づけない」状態になる。
@@ -210,8 +239,15 @@ class Supervisor:
         `upgrade --profile` のようにcatalogを消さない経路でも自己回復する。
         """
         version, build = stock_build_id(self.paths.stock_app)
+        tool_digest = toolcompat.compatibility_digest(
+            self.profile.registry,
+            self.paths.tool_compatibility,
+            build,
+        )
         unchanged = (version, build) == (self.state.version, self.state.build) and (
             self.state.catalog_profile_digest == self.profile.digest
+        ) and (
+            self.state.catalog_tool_digest == tool_digest
         )
         if unchanged and self.paths.composite_catalog.is_file() and not force:
             return False
@@ -223,14 +259,23 @@ class Supervisor:
             model_ids=self.profile.models,
             snapshot=self.paths.clone_template_snapshot,
             build_id=(version, build),
+            tool_compatibility=self.paths.tool_compatibility,
         )
         self.state.version, self.state.build = version, build
         self.state.catalog_profile_digest = self.profile.digest
+        self.state.catalog_tool_digest = tool_digest
         self.state.save(self.state_path)
         return True
 
     # [4][6] guard ----------------------------------------------------------
     def start_guard(self) -> int:
+        _version, build = stock_build_id(self.paths.stock_app)
+        try:
+            toolbridge.assert_supported_build(
+                self.tool_wire_builds, build
+            )
+        except toolbridge.ToolBridgeError as exc:
+            raise SupervisorError(str(exc)) from exc
         credential = CredentialStore(self.paths.credential_helper)
         instance = guard_module.Guard(
             allowed_models=self.profile.models,
@@ -277,9 +322,17 @@ class Supervisor:
             captured["model"] = configblock.read_top_level(current, "model")
             captured["provider"] = configblock.read_top_level(current, "model_provider")
             current_model = captured["model"]
-            if self.state.pending_default_model or (
-                current_model in self.all_registry_models
-                and current_model not in self.profile.models
+            # 単一model profileでは、専用起動のたびにそのmodelを選び直す。
+            # 選択肢が1つしかないのに native のまま起動すると、利用者から見て
+            # 「専用launcherで起動したのにOpenRouterへ行かない」だけになる。
+            # 複数modelでは利用者のpicker選択を尊重し、pending契約のままにする。
+            if (
+                len(self.profile.models) == 1
+                or self.state.pending_default_model
+                or (
+                    current_model in self.all_registry_models
+                    and current_model not in self.profile.models
+                )
             ):
                 current = configblock.upsert_top_level(
                     current, "model", self.profile.default_model
@@ -318,15 +371,60 @@ class Supervisor:
             raise AppError(f"公式ChatGPT.appが見つかりません: {self.paths.stock_app}")
         arguments = [str(executable)]
         if self.workspace is not None:
-            arguments.append(str(self.workspace))
+            arguments.extend(("--open-project", str(self.workspace)))
         environment = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
-        return subprocess.Popen(
+        process = subprocess.Popen(
             arguments,
             env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=False,
         )
+        try:
+            self.deliver_workspace()
+        except Exception:
+            # workspaceが届かないまま続けると、利用者から見て「dropしたfolderと
+            # 違うprojectが開く」だけになる。黙って劣化させず、起動ごと止める。
+            process.terminate()
+            raise
+        return process
+
+    def deliver_workspace(self) -> None:
+        """workspaceをLaunchServicesのopen document経路でも届ける。
+
+        ChatGPT build 6849 は起動引数の `--open-project` を無視し、直前に開いて
+        いたprojectを復元する。同じbuildでもopen document経路は効くため、起動後に
+        改めて渡す。古いbuildでは引数側が効くので、そちらも従来どおり残している。
+        """
+        if self.workspace is None:
+            return
+        executable = self.paths.stock_app / "Contents/MacOS/ChatGPT"
+        identifier = stock_bundle_identifier(self.paths.stock_app)
+        deadline = time.monotonic() + WORKSPACE_DELIVERY_SECONDS
+        # processとして見える前にopenを投げると、LaunchServicesが2つ目のinstanceを
+        # 起こしうる。起動を確認してから送る。
+        while not process_pids(executable):
+            if time.monotonic() >= deadline:
+                raise SupervisorError("純正appの起動を確認できず、workspaceを渡せませんでした")
+            time.sleep(0.5)
+        for _ in range(WORKSPACE_DELIVERY_REPEATS):
+            time.sleep(WORKSPACE_SETTLE_SECONDS)
+            self.send_workspace(identifier, deadline)
+
+    def send_workspace(self, identifier: str, deadline: float) -> None:
+        """open eventを1回届ける。失敗している間だけ期限まで再試行する。"""
+        while True:
+            result = subprocess.run(
+                ["/usr/bin/open", "-b", identifier, str(self.workspace)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            if time.monotonic() >= deadline:
+                raise SupervisorError(f"workspaceを純正appへ渡せませんでした: {self.workspace}")
+            time.sleep(1)
 
     # [8] 後始末 ------------------------------------------------------------
     def cleanup(self) -> list[str]:

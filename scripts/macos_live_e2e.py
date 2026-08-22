@@ -210,8 +210,9 @@ def _run_main() -> int:
         # 課金せず許可経路も実HTTPで通す。guard本体のforwarderだけをfixture化する。
         forwarded_bodies: list[bytes] = []
 
-        def fixture_forwarder(body: bytes, _key: str):
+        def fixture_forwarder(body: bytes, _key: str, metadata_enabled: bool):
             forwarded_bodies.append(body)
+            check("toolなしrequestはRouter Metadataを要求しない", not metadata_enabled)
             return 200, {"Content-Type": "text/event-stream"}, io.BytesIO(b"data: ok\n\n")
 
         supervisor._server.RequestHandlerClass.guard.forwarder = fixture_forwarder
@@ -304,8 +305,13 @@ def _run_main() -> int:
             raise E2EError(f"pickerを開けませんでした: {picker_result}")
         names = picker_result.get("names", [])
         or_count = sum(1 for n in names if n.startswith("[OR]"))
-        check("pickerにOpenRouterモデルが5件並ぶ", or_count == 5, f"{or_count}件")
-        if or_count != 5:
+        expected_or_count = len(supervisor.profile.models)
+        check(
+            "pickerにprofileのOpenRouterモデルだけが並ぶ",
+            or_count == expected_or_count,
+            f"expected={expected_or_count} actual={or_count}",
+        )
+        if or_count != expected_or_count:
             raise E2EError(f"pickerのOpenRouterモデル数が不正です: {or_count}")
 
         # --- native で1往復。guardに着弾しないこと -------------------------
@@ -339,17 +345,18 @@ def _run_main() -> int:
         # appのモデル選択は config/batchWrite で `model` を書く動作（Phase 0-Cで実測）。
         # menu自動操作は画面遷移で不安定なので、同じ書き込みを直接行って
         # watcher と guard の経路を検証する。
+        selected_model = supervisor.profile.default_model
         configblock.atomic_write(
             paths.shared_config,
             configblock.upsert_top_level(
-                paths.shared_config.read_text(), "model", "deepseek/deepseek-v4-pro"
+                paths.shared_config.read_text(), "model", selected_model
             ),
         )
         picked = "config-write"
         time.sleep(3)
         text = paths.shared_config.read_text()
         check("appがORモデルをconfigへ書く",
-              configblock.read_top_level(text, "model") == "deepseek/deepseek-v4-pro",
+              configblock.read_top_level(text, "model") == selected_model,
               f"picked={picked} model={configblock.read_top_level(text, 'model')}")
         check("watcherがmodel_providerをopenrouterへ追随させる",
               configblock.read_top_level(text, "model_provider") == "openrouter")

@@ -16,6 +16,9 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     private let noTrainingOnly = NSButton(checkboxWithTitle: "学習なしのみ", target: nil, action: nil)
     private let freeOnly = NSButton(checkboxWithTitle: "無料のみ", target: nil, action: nil)
     private let reasoningOnly = NSButton(checkboxWithTitle: "reasoningのみ", target: nil, action: nil)
+    private let showUnsupported = NSButton(
+        checkboxWithTitle: "tool非対応も表示（0件）", target: nil, action: nil
+    )
     private let countLabel = NSTextField(labelWithString: "")
     private let defaultPopUp = NSPopUpButton()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -31,6 +34,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     private var saving = false
     private var catalogLoaded = false
     private var catalogNotice = ""
+    private var toolRiskAcknowledged: Set<String> = []
 
     private static let placeholderTitle = "選択してください"
 
@@ -80,7 +84,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         searchField.action = #selector(filtersChanged)
         searchField.sendsSearchStringImmediately = false
 
-        for checkbox in [zdrOnly, noTrainingOnly, freeOnly, reasoningOnly] {
+        for checkbox in [zdrOnly, noTrainingOnly, freeOnly, reasoningOnly, showUnsupported] {
             checkbox.target = self
             checkbox.action = #selector(filtersChanged)
         }
@@ -89,7 +93,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         noTrainingOnly.toolTip = "学習しないと確認できたモデルだけを表示します。"
 
         let filterRow = NSStackView(views: [
-            searchField, zdrOnly, noTrainingOnly, freeOnly, reasoningOnly,
+            searchField, zdrOnly, noTrainingOnly, freeOnly, reasoningOnly, showUnsupported,
         ])
         filterRow.orientation = .horizontal
         filterRow.spacing = 10
@@ -193,7 +197,13 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
                 trainsOnData: (option.zdrSupported ?? true) ? false : nil,
                 free: false,
                 headline: ProfileBridge.CatalogEntry.Price(input: "—", output: "—", cacheRead: nil),
-                usageTokens: nil
+                usageTokens: nil,
+                toolSupport: option.toolSupport,
+                toolSupportReason: option.toolSupportReason,
+                toolVerifiedAt: option.toolVerifiedAt,
+                toolProvider: option.toolProvider,
+                toolProviderAttempt: option.toolProviderAttempt,
+                toolContractVersion: option.toolContractVersion
             )
         }
         table.update(
@@ -239,6 +249,7 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
             noTrainingOnly: noTrainingOnly.state == .on,
             freeOnly: freeOnly.state == .on,
             reasoningOnly: reasoningOnly.state == .on,
+            showUnsupported: showUnsupported.state == .on,
             search: searchField.stringValue
         )
         refreshControls()
@@ -248,16 +259,45 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
         guard isEditable else { return }
         if wanted {
             guard let entry = table.entry(id: model) else { return }
-            if entry.zdrSupported {
-                apply(selection: selected.union([model]))
+            let add = { [weak self] in
+                guard let self else { return }
+                if entry.zdrSupported {
+                    self.apply(selection: self.selected.union([model]))
+                } else {
+                    self.confirmNonZdr(entry)
+                }
+            }
+            if ["partial", "unsupported"].contains(entry.toolSupport ?? "unknown") {
+                confirmToolRisk(entry, then: add)
             } else {
-                confirmNonZdr(entry)
+                add()
             }
             return
         }
         var next = selected
         next.remove(model)
+        toolRiskAcknowledged.remove(model)
         apply(selection: next)
+    }
+
+    private func confirmToolRisk(
+        _ entry: ProfileBridge.CatalogEntry,
+        then continuation: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(entry.displayName) はCodex tool互換が不完全です"
+        alert.informativeText =
+            "状態: \(entry.toolSupport ?? "unknown")\n"
+            + "exec・apply_patchなどのdirect toolが動かない可能性があります。\n\n"
+            + (entry.toolSupportReason ?? "互換性の根拠はありません。")
+        alert.addButton(withTitle: "リスクを承認して追加")
+        alert.addButton(withTitle: "やめる")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            self.toolRiskAcknowledged.insert(entry.id)
+            continuation()
+        }
     }
 
     /// ZDRなしのモデルは既定の安全性を下げる。黙って通さず、何が変わるかを出す。
@@ -324,11 +364,12 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     private func refreshControls() {
         guard snapshot != nil else { return }
         let editable = isEditable
-        for checkbox in [zdrOnly, noTrainingOnly, freeOnly, reasoningOnly] {
+        for checkbox in [zdrOnly, noTrainingOnly, freeOnly, reasoningOnly, showUnsupported] {
             checkbox.isEnabled = catalogLoaded
         }
         searchField.isEnabled = catalogLoaded
         defaultPopUp.isEnabled = editable && !selected.isEmpty
+        showUnsupported.title = "tool非対応も表示（\(table.unsupportedCount)件）"
         countLabel.stringValue = "表示 \(table.visibleCount)件 / 選択 \(selected.count)件"
 
         let usable = resolvedDefault
@@ -370,6 +411,13 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
             return "ZDRなしのモデルを\(withoutZdr.count)件選んでいます。"
                 + "そのモデルへ送った内容はproviderに保持される可能性があります。"
         }
+        let risky = selected.filter {
+            ["partial", "unsupported"].contains(table.entry(id: $0)?.toolSupport ?? "")
+        }
+        if !risky.isEmpty {
+            return "Codex tool互換が不完全なモデルを\(risky.count)件選んでいます。"
+                + "exec・apply_patchなどのdirect toolが動かない可能性があります。"
+        }
         return ""
     }
 
@@ -382,12 +430,113 @@ final class ModelSettingsWindow: NSObject, NSWindowDelegate {
     private func save() {
         guard let defaultModel = resolvedDefault, !saving else { return }
         let models = orderedSelection()
+        let existing = Set(snapshot?.profile.models ?? [])
+        let newlySelected = Set(models).subtracting(existing)
+        let needsVerification = newlySelected.filter { model in
+            let status = table.entry(id: model)?.toolSupport ?? "unknown"
+            return status == "declared" || status == "unknown"
+        }.sorted()
+        if !needsVerification.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "新規モデルのCodex tool互換を検査します"
+            alert.informativeText =
+                "structured functionとfreeform toolの低token canaryを実行します。"
+                + "OpenRouter APIの少額利用料が発生する場合があります。"
+            alert.addButton(withTitle: "検査して続ける")
+            alert.addButton(withTitle: "やめる")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self, response == .alertFirstButtonReturn else { return }
+                self.verifyAndSave(
+                    models: models,
+                    defaultModel: defaultModel,
+                    verify: needsVerification
+                )
+            }
+            return
+        }
+        performSave(models: models, defaultModel: defaultModel)
+    }
+
+    private func verifyAndSave(models: [String], defaultModel: String, verify: [String]) {
         saving = true
         refreshControls()
         progress.startAnimation(nil)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = Result { try ProfileBridge.verifyTools(models: verify) }
+            DispatchQueue.main.async {
+                self?.finishToolVerification(
+                    outcome, models: models, defaultModel: defaultModel
+                )
+            }
+        }
+    }
+
+    private func finishToolVerification(
+        _ outcome: Result<ProfileBridge.ToolVerification, Error>,
+        models: [String],
+        defaultModel: String
+    ) {
+        switch outcome {
+        case .failure(let error):
+            saving = false
+            progress.stopAnimation(nil)
+            refreshControls()
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Codex tool互換を判定できませんでした"
+            alert.informativeText = error.localizedDescription
+            alert.beginSheetModal(for: window)
+        case .success(let verification):
+            table.applyToolResults(verification.results)
+            let risky = verification.results.filter {
+                $0.toolSupport == "partial" || $0.toolSupport == "unsupported"
+            }
+            if risky.isEmpty {
+                performSave(models: models, defaultModel: defaultModel, alreadySaving: true)
+                return
+            }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Codex tool互換が不完全なモデルがあります"
+            alert.informativeText = risky.map {
+                "\($0.id): \($0.toolSupport) — \($0.toolSupportReason)"
+            }.joined(separator: "\n")
+                + "\n\nexec・apply_patchなどのdirect toolが動かない可能性があります。"
+            alert.addButton(withTitle: "リスクを承認して保存")
+            alert.addButton(withTitle: "保存しない")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self else { return }
+                if response == .alertFirstButtonReturn {
+                    self.toolRiskAcknowledged.formUnion(risky.map(\.id))
+                    self.performSave(
+                        models: models, defaultModel: defaultModel, alreadySaving: true
+                    )
+                } else {
+                    self.saving = false
+                    self.progress.stopAnimation(nil)
+                    self.refreshControls()
+                }
+            }
+        }
+    }
+
+    private func performSave(
+        models: [String], defaultModel: String, alreadySaving: Bool = false
+    ) {
+        if !alreadySaving {
+            saving = true
+            refreshControls()
+            progress.startAnimation(nil)
+        }
+        let acknowledged = Array(toolRiskAcknowledged.intersection(models)).sorted()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome = Result {
-                try ProfileBridge.apply(models: models, defaultModel: defaultModel)
+                try ProfileBridge.apply(
+                    models: models,
+                    defaultModel: defaultModel,
+                    toolRiskAcknowledged: acknowledged
+                )
             }
             DispatchQueue.main.async { self?.finishSave(outcome) }
         }
