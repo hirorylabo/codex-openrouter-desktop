@@ -319,3 +319,80 @@ rm ~/.local/bin/codex-router-update
 ```
 
 trial ごと戻す場合は本文「復帰手順」を参照。
+
+---
+
+# 追記2（2026-08-22）: effort に `max` が出ない件は OpenAI 側のバグだった
+
+## 症状
+
+curated 3件で `reasoningLevels` に `max` を入れても picker に出ない。調査の結果、
+**native の `gpt-5.6-sol` でも同じく `max` が落ちていた**（catalog は6段
+`low/medium/high/xhigh/max/ultra`、picker は5段 `軽/中/高/極高/Ultra`）。
+routed 固有の問題でも catalog の設定ミスでもない。
+
+## 原因（app のコードで特定）
+
+`app.asar` → `/webview/assets/app-initial-DOX-K1rC.js`:
+
+```js
+Zje = hl([`none`,`minimal`,`low`,`medium`,`high`,`xhigh`,`max`,`ultra`])  // schema（全語彙）
+Qje = [`low`,`medium`,`high`,`xhigh`,`ultra`]                             // ← default から max だけ欠落
+Ju = { enabledReasoningEfforts: ku({
+  agentAccess: `hidden`, default: Qje,
+  description: `Reasoning effort levels available in model controls`,
+  key: `enabled-reasoning-efforts`, schema: sl(Zje) }) }
+```
+
+`max` は schema に含まれるのに **既定値の配列からだけ抜けている**。catalog が正しく
+`max` を宣言しても picker に出ない理由はこれ。
+
+ラベル欠落ではない。`/webview/assets/ja-JP-*.js` に
+`composer.mode.local.reasoning.max.label` = `最大` が定義済み。
+（`low` だけ `composer.mode.local.reasoning.low.label.v2` という別キーなので grep 時は注意）
+
+## 同一報告（upstream）
+
+- [openai/codex#33805](https://github.com/openai/codex/issues/33805) — macOS の picker で
+  GPT-5.6 Luna/Terra/Sol の Max が欠落。iOS では出る。Terra/Sol は Extra High から直接 Ultra へ飛ぶ
+- [openai/codex#38338](https://github.com/openai/codex/issues/38338) — Linux でも同様
+- [openai/codex#35763](https://github.com/openai/codex/issues/35763) — VS Code 拡張でも同様
+
+## 対処（実機で解決を確認）
+
+`~/.codex/config.toml` の `[desktop]` に既定値の上書きを1行入れる。marker block の外側だが
+別領域なので codex-router とも自作実装とも衝突しない。
+
+```toml
+[desktop]
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
+```
+
+同セクションの `show-context-window-usage` が同じ `ku({... key:'...' ...})` 構造で機能して
+いることから同経路と判断した。`agentAccess: "hidden"` は agent 向け API を塞ぐ指定であって
+永続化層とは別、という読みが実機で裏づけられた。
+
+**結果**: `最大` が全モデルで表示されるようになった。routed 3件だけでなく
+**native の 5.6 Sol も 6段（軽/中/高/極高/最大/Ultra）に是正された**。
+
+退避: `~/.local/share/codex-openrouter-trial/2026-08-22/config.toml.before-effort-setting`
+
+## 最終的な effort ladder
+
+app 側が直ったため、天井は vendor の実天井 `max` のままで良い。ラダーは連続にしてある
+（OpenRouter は未対応値を近い値へ写像するので中間段の追加に実害はない）。
+
+| model | `reasoningLevels` | `defaultEffort` |
+| --- | --- | --- |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | low / medium / high / xhigh / max | high |
+| `openrouter/deepseek/deepseek-v4-pro-0813` | high / xhigh / max | high |
+| `openrouter/moonshotai/kimi-k3` | low / medium / high / xhigh / max | high |
+
+## この調査で否定した仮説（再検証を避けるため）
+
+| 仮説 | 判定 |
+| --- | --- |
+| 非連続ラダー（low→high→max）が描画を壊す | **否定**。upstream registry も DeepSeek に非連続を出荷している |
+| 日本語ローカライズに `max` のラベルが無い | **否定**。`最大` は定義済み |
+| routed entry に native 固有フィールドが足りない | **否定**。差分は `tool_mode` と速度 tier のみで effort 描画に無関係 |
+| app が `max` を描画できない | **否定**。`kN()` は `max` を受理する。既定値配列の問題だった |
