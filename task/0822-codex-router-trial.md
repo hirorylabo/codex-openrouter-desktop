@@ -149,3 +149,173 @@ diff ~/.local/share/codex-openrouter-trial/2026-08-22/config.toml ~/.codex/confi
 PYTHONPATH=src python3 scripts/run_unit_tests.py
 uvx ruff@0.16.3 check .
 ```
+
+---
+
+# 追記（2026-08-22）: 実使用で出た4件の修正と patch の自動継承
+
+実使用で4件出た。いずれも codex-router の既定値と curation の保守的な既定メタデータに起因する。
+
+| # | 症状 | 原因 | 対処 |
+| --- | --- | --- | --- |
+| 1 | Grok が 401（`xai rejected the OAuth session`） | `~/.grok/auth.json` が 2026-05-27 のもので期限切れ | `grok login --oauth`（完了） |
+| 2 | effort が「高」1段しか選べない | curation の保守的既定。`reasoningLevels` が1件 | モデル別 ladder を設定 |
+| 3 | ZDR もコスパ最適も効かない | codex-router は OpenRouter へ `provider` block を一切送らない | local patch |
+| 4 | 表示名 `deepseek/deepseek-v4-flash-0731 (curated)` が切れる | `` `${upstreamId} (curated)` ``（`src/user-models.mjs:91`） | 手編集 |
+| 5 | forced `tool_choice` 対策が無い | curated entry に `requestProfile` なし | 同 patch 内で対応 |
+
+> [!WARNING]
+> **`doctor` は期限切れの Grok session を「OK」と報告していた。** ファイルの存在だけを見て
+> 有効性を検証していない。catalog の fail-open と同系統の弱点。
+
+## OpenRouter 仕様の確認（公式 docs）
+
+「ZDR用 key と ZDRなし key を作って切り替える」案は**成立しない**。
+
+- provider 選好は **per-request か account 全体のどちらかで、API key 単位ではない**
+- ZDR の request-level 指定は account 設定と **OR**。account が ON なら per-request で緩められず、
+  OFF にすると codex-router は何も送らないので ZDR が全面的に消える
+- `reasoning.effort` は `max`/`xhigh`/`high`/`medium`/`low`/`minimal`/`none` を受ける。
+  **未対応値は 400 にならず近い値へ写像される**。ただし Codex 語彙の **`ultra` は受けない**
+
+### tool 互換 provider の絞り込みは「自動」だった
+
+> When you send a request with `tools` or `tool_choice`, OpenRouter makes a best effort to route to
+> providers known to support tool use. ... even when `require_parameters` is false, `tools`,
+> `response_format` (including structured outputs), and `verbosity` are used as a soft preference
+> ... this preference never removes a model from your request's candidate list.
+
+つまり tool 対応での絞り込みは既に自動で、しかも候補を空にしない安全側の実装。
+**`require_parameters: true` を既定にしてはいけない。** 全パラメータへの hard 制約で、
+満たす endpoint が無いと 404 になる（zed#36094 / mastra#2839 / continue#3849 等で多数報告）。
+
+`/api/v1/models/{id}/endpoints` の実測（2026-08-22）:
+
+| model | endpoints | `tools` | `tool_choice` | `parallel_tool_calls` | `structured_outputs` |
+| --- | --- | --- | --- | --- | --- |
+| `deepseek-v4-flash-0731` | 31 | 31/31 | 31/31 | **1/31**（Inceptron のみ） | 22/31 |
+| `deepseek-v4-pro-0813` | 14 | 12/14 | 12/14 | **0/14** | 7/14 |
+| `moonshotai/kimi-k3` | 15 | 13/15 | 11/15 | **0/15** | 14/15 |
+
+0821 §1.7 の「30 endpoint 中 1つしか `parallel_tool_calls` を公称しない」の裏取りになっている。
+`use_responses_lite: false` により Codex は classic 形式で送る側なので、`require_parameters: true`
+を足すと Flash は 1件に潰れ、**Pro と Kimi K3 は 0件＝404** になり得る。よって profile 側で
+`parallel_tool_calls` を落とす。
+
+また OpenRouter は `deepseek-v4-flash-0731` を **1,310,720** と公称しているが、curation は
+1,048,576 を保存していた（`autoCompact` ごと修正）。
+
+## patch 本体
+
+`~/.local/share/codex-router/src/api-forwarder.mjs` の `const endpoint = endpointForModel(model);`
+の直前へ、**else-if チェーンの外の独立ブロック**として挿入する。チェーンを延ばすと upstream の
+分岐変更に弱いため、単一アンカーへの挿入にした。
+
+```js
+  // >>> codex-openrouter-trial:openrouter-provider-profiles >>>
+  if (String(model.requestProfile || "").startsWith("openrouter-")) {
+    const profile = String(model.requestProfile);
+    payload.provider = {
+      ...(payload.provider || {}),
+      sort: "price",
+      ...(profile.includes("-zdr") ? { zdr: true, data_collection: "deny" } : {}),
+      ...(profile.endsWith("-strict") ? { require_parameters: true } : {}),
+    };
+    delete payload.parallel_tool_calls;
+    if (payload.tool_choice !== undefined && payload.tool_choice !== "none") {
+      payload.tool_choice = "auto";
+    }
+  }
+  // <<< codex-openrouter-trial:openrouter-provider-profiles <<<
+```
+
+`reasoning_effort` は意図的に触らない（OpenRouter が写像するため、推測写像を足さない）。
+
+### profile の切り替え
+
+`~/.codex/codex-router/user-models.json` の `requestProfile` を書き換えて `bin/control apply`。
+接尾辞で判定するので分岐は増えない。
+
+| profile | 送る `provider` | 想定 |
+| --- | --- | --- |
+| `openrouter-zdr-floor`（既定） | `zdr, data_collection:"deny", sort:"price"` | 日常 |
+| `openrouter-floor` | `sort:"price"` | ZDR を外して候補を広げる |
+| `openrouter-zdr-strict` | 上 + `require_parameters:true` | 抽選ノイズを潰す。**404 リスクあり**。gate 5 の切り分け用 |
+
+`sort` を入れると **load balancing が無効化**され順次試行になる（`allow_fallbacks` は既定 true）。
+
+## 自動継承の仕組み
+
+`bin/update` の実装は次のとおり。
+
+```
+git fetch origin main
+dirty tree → 拒否（--force なら git reset --hard HEAD で破棄）
+main branch でなければ拒否
+git merge --ff-only origin/main      ← post-merge hook が発火
+installCurrentCheckout()
+```
+
+- **自動更新の trigger は存在しない**（`updateCheckout` の呼び出しは `bin/update` のみ）
+- untracked file は dirty 判定に含めない（`--untracked-files=no`）
+- **ChatGPT.app の verup は patch を壊さない。** 壊すのは codex-router 自身の更新だけ
+
+3層で対応した。
+
+| 層 | 実体 | 役割 |
+| --- | --- | --- |
+| 1 | `~/.local/share/codex-router/.git/hooks/post-merge` | merge 後に再適用。`.git/hooks/` は追跡外で `reset --hard` でも消えない |
+| 2 | `~/.local/bin/codex-router-update` | patch を剥がす → `bin/update` → 再適用 → 検証。`trap` で失敗時も必ず再適用する |
+| 3 | upstream への PR | マージされれば patch も hook も wrapper も不要になる（本命） |
+
+適用スクリプトは `~/.local/share/codex-openrouter-trial/patches/apply-openrouter-provider-profiles.py`。
+冪等で、アンカーが見つからなければ **stderr へ理由を出して非ゼロ終了**する（黙って素の状態で
+走らせない）。`node --check` を通してから atomic に置換する。
+
+> [!NOTE]
+> git は `post-merge` の終了コードを**無視する**（merge の結果に影響できない）。
+> よって層1は通知役で、最終的な検証責任は層2の wrapper が持つ。
+
+### 実機で更新を跨いだ検証（2026-08-22）
+
+`codex-router-update` を実行したところ、実際に upstream 更新が発生し、自動継承が実証された。
+
+| 項目 | 結果 |
+| --- | --- |
+| 更新 | `47d67626` → `b01cf559`（`updated: true, reinstalled: true`） |
+| 更新に含まれた変更 | **`f47bbca api-forwarder: preserve streamed usage from chat providers`** ＝ patch 対象ファイル自体が変更された |
+| patch | post-merge hook が自動再適用（wrapper 側は "already applied"） |
+| 挿入位置 | 799行 → **818行へ移動**。行番号ベースの `.patch` なら失敗していた |
+| 構文 | `node --check` OK |
+| service | 14:50:15 起動 / patch 14:49:36 ＝ patched code を読み込み済み |
+
+## モデル別 effort ladder
+
+各モデルの実 ladder は codex-router の checked-in registry（同じ upstream model を vendor 直結
+経路で互換テスト済み）から採った。
+
+| curated model | `reasoningLevels` | `defaultEffort` | 根拠 |
+| --- | --- | --- | --- |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | `low` / `high` / `max` | `high` | `config/deepseek/deepseek-v4-flash.json` |
+| `openrouter/deepseek/deepseek-v4-pro-0813` | `high` / `max` | `high` | `config/deepseek/deepseek-v4-pro.json`（**`low` を持たない**） |
+| `openrouter/moonshotai/kimi-k3` | `low` / `high` / `max` | `max` | `config/kimi/api/kimi-k3.json` |
+
+**今後モデルを追加したときの判定手順**:
+
+1. codex-router の `config/` に同じ upstream model があれば、その `reasoningLevels` を採る
+2. 無ければ vendor 公式 docs
+3. どちらも無ければ `/api/v1/models` の `supported_parameters` に `reasoning_effort` があることを
+   確認し、写像に委ねて `low` / `high` / `max` の保守的3段
+4. `ultra` は入れない（OpenRouter が受けない）
+
+## 撤去手順（追記分）
+
+```bash
+# patch だけ外す
+rm ~/.local/share/codex-router/.git/hooks/post-merge
+git -C ~/.local/share/codex-router checkout -- src/api-forwarder.mjs
+~/.local/share/codex-router/bin/control service restart
+rm ~/.local/bin/codex-router-update
+```
+
+trial ごと戻す場合は本文「復帰手順」を参照。
