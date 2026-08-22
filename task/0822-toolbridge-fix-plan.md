@@ -307,6 +307,13 @@ endpoint を引く。DeepSeekで structured_outputs を公称するのは 22/30 
 「1回の外れで実態より悪く出る」性質は残る。対処するなら短絡をやめて両方測るか、
 canary に `sort` を付けて endpoint を固定する。
 
+### 中断（2026-08-22）
+
+step 8（実機 Run 2）の gate 1 で `tool_bridge_error` により停止。
+`codex exec` が送る tool wire を `prepare_document()` が拒否している
+（guard.log に `bridge-denied` / 268,080 bytes）。原因はほぼ特定できているが
+実 payload は未捕獲。**続きは [`0822-run2-handoff.md`](./0822-run2-handoff.md)。**
+
 ### 次にやること
 
 1. runtime を promote する（`./codex-openrouter` は
