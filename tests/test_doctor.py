@@ -176,7 +176,7 @@ class TemplateSnapshotCheckTests(DoctorTestCase):
 class ToolWireBuildCheckTests(DoctorTestCase):
     def test_latest_build_is_accepted(self):
         with mock.patch.object(
-            doctor_module, "stock_build_id", return_value=("26.814", "6720")
+            doctor_module, "stock_build_id", return_value=("26.818", "6962")
         ):
             doctor_module.check_tool_wire_build(
                 self.doctor, self.paths, ROOT / "models/registry.json"
