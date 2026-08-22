@@ -146,7 +146,7 @@ diff ~/.local/share/codex-openrouter-trial/2026-08-22/config.toml ~/.codex/confi
 ~/.local/share/codex-router/bin/status
 
 # 本 repo の local gate が影響を受けていないこと
-PYTHONPATH=src python3 scripts/run_unit_tests.py
+PYTHONPATH=src python3 -m unittest discover -s tests -v --buffer
 uvx ruff@0.16.3 check .
 ```
 
