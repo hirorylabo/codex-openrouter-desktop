@@ -1,5 +1,8 @@
 # 0823 Run 4: C2 (PR→CI→merge→promote) 実行計画 — 並列検証による確度評価付き
 
+Status: **完了。** PR #28 は 2026-08-23 13:08 に merge 済み。V1–V4 全 green。
+promote も完了(installed source d9571f2 / build 6962)。
+
 作成日: 2026-08-23 / branch: `fix/p1p2-canary-and-approvals` @ `95a8929`(未push 5 commits)
 前提: `0822-p1p2-refactor-plan.md` の A/B フェーズ実装済み。canary 問題(max_output_tokens 64
 では reasoning tokens に食われて arguments 途切れ)は `95a8929` で解決済み。
@@ -107,14 +110,15 @@ push 後にしか走らないため、push は「V2/V3 が green であること
 
 ## 5. 検証結果記録欄
 
-- V1 (CI): 未実施(push後)
+- V1 (CI): ✅ PR #28 で 11/11 SUCCESS(CI + CodeQL)
 - V2 canary: (a) no-sort 3/3 PING (b) sort+zdr 3/3 PING (c) sort only 3/3 PING
   → zdr_supported:null でも provider ピン留め不要で安定。256 で全パターン健全。
   catalog 側修正は不要(plan §6 のスコープ外維持)
 - V3 gate2: ✅ farewell3 追加成功(オーバーライドなし)。guard.log: deepseek forwarded /
   native slug (gpt-5.6-luna) denied 維持。launch 停止後 config 復帰も確認(provider=openai,
   approvals_reviewer=auto_review 不変)
-- V4 promote後: ___
+- V4 promote後: ✅ install-manifest source=d9571f2 / build=6962 へ更新済み(2026-08-23 13:2x 時点で
+  upgrade 済みだったことが判明)。check PASS(no persistent files changed)
 
 ## 6. スコープ外(明示)
 
