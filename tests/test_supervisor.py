@@ -477,6 +477,13 @@ class ProfileRuntimeTests(SupervisorTestCase):
             registry={model: REGISTRY[model]},
         )
         instance = sup.Supervisor(self.paths, REGISTRY_PATH, profile=profile, port=0)
+        with mock.patch.object(sup.guard_module, "serve") as serve, \
+                mock.patch.object(sup.guard_module, "health_ok", return_value=True), \
+                mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")), \
+                mock.patch.object(sup.toolbridge, "assert_supported_build"):
+            serve.return_value = (mock.Mock(), 0)
+            instance.start_guard()
+        self.assertEqual(instance.guard.review_model, model)
         with mock.patch.object(sup.catalog, "generate", return_value=self.paths.composite_catalog) as gen:
             with mock.patch.object(sup, "stock_build_id", return_value=("26.1", "6396")):
                 instance.refresh_catalog_if_needed(force=True)

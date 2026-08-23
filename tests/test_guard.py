@@ -100,7 +100,38 @@ class AllowlistTests(GuardTestCase):
         self.assertEqual(self.forwarder.calls, [])
 
     def test_missing_model_is_never_forwarded(self):
-        status, _ = self.post({"input": "x"})
+        status, _ = self.post({"input": "hi", "model": None})
+        self.assertEqual(status, 400)
+
+    def test_auto_review_alias_is_rerouted_to_default_model(self):
+        """`codex-auto-review` 宛ての審査requestは既定modelへ書き換えて通す。
+
+        catalogの `auto_review_model_override`（catalog.py参照）により
+        審査要求はこのaliasで来る。許可リスト外slugのまま拒否すると
+        approvals_reviewer="auto_review"環境でapply_patchが必ず落ちる。
+        書き換え先はguardが知っている既定model。他の未知slugは依然拒否。
+        """
+        self.guard.review_model = "deepseek/deepseek-v4-pro"
+        try:
+            status, _ = self.post(
+                {"model": "codex-auto-review", "input": "review this patch"}
+            )
+            self.assertEqual(status, 200)
+            body, _, _ = self.forwarder.calls[0]
+            self.assertEqual(json.loads(body)["model"], "deepseek/deepseek-v4-pro")
+        finally:
+            self.guard.review_model = None
+
+    def test_auto_review_alias_without_configuration_is_denied(self):
+        """review_model未設定なら審査aliasも拒否する（fail-closed維持）。"""
+        self.assertIsNone(self.guard.review_model)
+        status, _ = self.post(
+            {"model": "codex-auto-review", "input": "review this patch"}
+        )
+        self.assertEqual(status, 400)
+
+    def test_other_unknown_slugs_still_denied_after_alias_support(self):
+        status, _ = self.post({"model": "totally-unknown-model", "input": "hi"})
         self.assertEqual(status, 400)
         self.assertEqual(self.forwarder.calls, [])
 

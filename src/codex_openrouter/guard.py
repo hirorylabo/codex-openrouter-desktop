@@ -28,6 +28,11 @@ ENDPOINT = "https://openrouter.ai/api/v1/responses"
 HEALTH_PATH = "/__guard/health"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 
+# codexのpatch審査が宛てる内部model名。catalog側で
+# `auto_review_model_override` をORモデル自身へ向けていても、
+# 審査request自体はこの名前で来るためguardで既定modelへ書き換える。
+AUTO_REVIEW_ALIAS = "codex-auto-review"
+
 
 class GuardError(RuntimeError):
     pass
@@ -89,6 +94,7 @@ class Guard:
         nonce: str = "",
         access_token: str = "",
         zdr_models: Iterable[str] | None = None,
+        review_model: str | None = None,
     ):
         self.allowed = frozenset(allowed_models)
         # 省略時は全modelへZDRを強制する。安全側が既定で、外すのは
@@ -99,9 +105,20 @@ class Guard:
         self.forwarder = forwarder
         self.nonce = nonce
         self.access_token = access_token
+        # auto review審査(`codex-auto-review`)の書き換え先。catalogの
+        # `auto_review_model_override` と対になる。Noneなら審査aliasも拒否。
+        self.review_model = review_model
         self._lock = threading.Lock()
 
+    def resolve_model(self, model: str | None) -> str | None:
+        """審査aliasを既定modelへ写像する。それ以外はそのまま。"""
+        if model == AUTO_REVIEW_ALIAS:
+            return self.review_model
+        return model
+
     def allows(self, model: str | None) -> bool:
+        if model == AUTO_REVIEW_ALIAS:
+            return bool(self.review_model)
         return model is not None and model in self.allowed
 
     def record(self, **fields) -> None:
@@ -212,6 +229,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.guard.record(model=model, decision="denied", bytes=len(body))
             self._send(400, deny_payload(model), "application/json")
             return
+
+        # 審査aliasは既定modelへ書き換えてからbridgeへ渡す。
+        resolved = self.guard.resolve_model(model)
+        if model == AUTO_REVIEW_ALIAS:
+            body = json.dumps(
+                {**parsed, "model": resolved}, ensure_ascii=False
+            ).encode("utf-8")
+            model = resolved
 
         try:
             prepared = self.guard.prepare_request(body)

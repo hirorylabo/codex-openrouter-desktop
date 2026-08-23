@@ -90,6 +90,17 @@ class BuildTests(unittest.TestCase):
         for slug in REGISTRY:
             self.assertTrue(self.by_slug[slug]["display_name"].startswith(catalog.OR_PREFIX))
 
+    def test_auto_review_override_points_at_the_entry_itself(self):
+        """OR entryはauto review審査モデルを自分自身へ向ける。
+
+        審査要求が `codex-auto-review` 宛てになるとguardが拒否して
+        apply_patchが必ず落ちる（0822 gate 2実測）。catalogの
+        `auto_review_model_override` で審査を同じORモデルへ寄せ、
+        guard側はそのaliasだけを許す。
+        """
+        for slug in REGISTRY:
+            self.assertEqual(self.by_slug[slug]["auto_review_model_override"], slug)
+
     def test_efforts_follow_registry(self):
         for slug, spec in REGISTRY.items():
             efforts = [
