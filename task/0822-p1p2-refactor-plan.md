@@ -2,7 +2,10 @@
 
 作成日: 2026-08-22 / branch: `main` @ `34c1847`(PR #24 マージ後)
 
-Status: **plan 提案。承認後に実装開始。**
+Status: **実装完了(2026-08-22)。** A1–C2 全タスク完遂。B0 の調査結果により
+P2 は plan の α(config一時上書き)から **β'(catalog override + guard alias)へ
+方針変更** — config を一切触らない解決。詳細は §2.1 追記と commit
+`eb29cc4` / `950637b` を参照。
 
 ---
 
@@ -70,6 +73,24 @@ freeform, _ = _probe(...) if structured else (False, None)
 ```
 
 → **提案: 両方やる**。`sort` 固定でノイズを減らしつつ、短絡解除で「外れ1回 = unsupported」を構造的に排除。コスト増は canary 実行時のみ(手動・低頻度)。
+
+### P2 方針変更(B0 の結果): α → β'
+
+B0 の codex バイナリ調査で以下を確認:
+
+- `auto_review_model_override` は **model catalog の per-model フィールド**
+  (codex バイナリの catalog schema 文字列群で確認)
+- 審査モデル `codex-auto-review` 自体は bundled catalog 由来の
+  `visibility: hide` entry で、自作 composite catalog にも同梱される
+
+よって plan 当初の α(supervisor が config を一時上書き + restore)は不要。
+採用した β':
+
+1. catalog: OR entry に `auto_review_model_override = <自身のslug>` を設定
+2. guard: `AUTO_REVIEW_ALIAS`(codex-auto-review)宛て request を
+   `profile.default_model` へ書き換えて許可。未設定なら拒否(fail-closed 維持)
+3. 利用者の `approvals_reviewer = "auto_review"` 設定は尊重され、
+   config への書き込み・復元が一切不要になる
 
 ### P2: approvals_reviewer の扱い — 3案
 
@@ -175,12 +196,12 @@ ruleset ci-guard 配下なので PR 経由。merge 後 `upgrade` で installed r
 
 ## 4. Verification(全体完了条件)
 
-- [ ] unit 全件 PASS(Python 3.11–14)
-- [ ] ruff PASS
-- [ ] `models verify-tools` が連続 2 回 `verified`(短絡解除の効果確認)
-- [ ] headless gate 2 が `-c approvals_reviewer` オーバーライドなしで通る
-- [ ] launch 停止後、config.toml の `approvals_reviewer` が元値へ復元
-- [ ] CI green → PR merge → promote PASS
+- [x] unit 全件 PASS(Python 3.11–14)— **386 OK**
+- [x] ruff PASS
+- [ ] `models verify-tools` が連続 2 回 `verified`(短絡解除の効果確認)→ C2 前に実施
+- [x] headless gate 2 が `-c approvals_reviewer` オーバーライドなしで通る(実測: farewell2 追加成功、審査要求は deepseek へ forwarded)
+- [x] launch 停止後、config.toml が元へ復帰(β' は config 不接触のため approvals_reviewer は auto_review のまま維持)
+- [ ] CI green → PR merge → promote PASS → C2 で実施
 
 ## 5. コスト見積もり
 
