@@ -283,12 +283,14 @@ class Supervisor:
             log_path=self.paths.guard_log,
             nonce=self.nonce,
             access_token=self.access_token,
+            review_model=self.profile.default_model,
             zdr_models=[
                 model
                 for model, spec in self.profile.registry.items()
                 if spec.get("zdr_supported", True)
             ],
         )
+        self.guard = instance
         try:
             self._server, actual = guard_module.serve(instance, port=self.port)
         except OSError as exc:

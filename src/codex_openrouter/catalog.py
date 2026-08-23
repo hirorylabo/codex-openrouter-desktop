@@ -198,6 +198,11 @@ def build(
         if "input_modalities" in entry:
             entry["input_modalities"] = spec.get("codex_modalities") or ["text"]
         entry["supports_parallel_tool_calls"] = bool(spec.get("supports_parallel_tool_calls"))
+        # auto review審査(`codex-auto-review`)をこのentry自身へ向ける。
+        # overrideなしの審査要求はguardが許可しないので、これがないと
+        # approvals_reviewer="auto_review"環境でapply_patchが必ず拒否される
+        # （0822 gate 2実測）。guard側も対応するalias許可を持つ。
+        entry["auto_review_model_override"] = slug
 
         for source in (RESET_FIELDS, NATIVE_ONLY_FIELDS):
             for field, value in source.items():

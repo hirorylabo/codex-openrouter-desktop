@@ -3,14 +3,14 @@
   "tool_contract_version": 3,
   "builds": [
     {
+      "build": "6962",
+      "chatgpt_version": "26.818.41509",
+      "fixture": "codex-tool-wire-6962"
+    },
+    {
       "build": "6849",
       "chatgpt_version": "26.818.21641",
       "fixture": "codex-tool-wire-6849"
-    },
-    {
-      "build": "6720",
-      "chatgpt_version": "26.814.41407",
-      "fixture": "codex-tool-wire-6720"
     }
   ]
 }
