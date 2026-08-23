@@ -198,10 +198,12 @@ ruleset ci-guard 配下なので PR 経由。merge 後 `upgrade` で installed r
 
 - [x] unit 全件 PASS(Python 3.11–14)— **386 OK**
 - [x] ruff PASS
-- [ ] `models verify-tools` が連続 2 回 `verified`(短絡解除の効果確認)→ C2 前に実施
+- [x] `models verify-tools` が連続 2 回 `verified`(短絡解除の効果確認)→ **達成(2026-08-23)**。
+  ただし追加で max_output_tokens 64→256 が必要だった(reasoning tokens が arguments を
+  打ち切る。`95a8929` 実測)
 - [x] headless gate 2 が `-c approvals_reviewer` オーバーライドなしで通る(実測: farewell2 追加成功、審査要求は deepseek へ forwarded)
 - [x] launch 停止後、config.toml が元へ復帰(β' は config 不接触のため approvals_reviewer は auto_review のまま維持)
-- [ ] CI green → PR merge → promote PASS → C2 で実施
+- [x] CI green → PR merge → promote PASS → **PR #28 merge・promote 完了(2026-08-23、CI 11/11)**
 
 ## 5. コスト見積もり
 

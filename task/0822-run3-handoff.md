@@ -126,8 +126,12 @@ app（ChatGPT.app）経由では利用者の approval 設定に従うので、�
 
 ## 6. 残っていること
 
-- PR #24 の CI 確認（push 直後は pending。11 checks）
-- CI green を確認したら draft → ready 判断はユーザー承認を得てから
-- `models verify-tools` canary は未再実施（contract 3 のまま変わっていないが、wire に
-  server tool が混ざるようになったので念のため1回）
-- app 経由（191 tools）での web_search 型送出は今回未検証。CLI と同じ型集合なら同じ翻訳で通る
+> **[2026-08-23 解決済み]** 後続の `0823-run4-c2-execution-plan.md` で完遂。
+> PR #28 として merge・promote 済み(verify-tools 連続2回 verified、CI 11/11、
+> gate 2 オーバーライドなしで通過)。app 経由の web_search 送出検証のみスコープ外として維持。
+
+- ~~PR #24 の CI 確認~~ → PR #28 として 11/11 SUCCESS
+- ~~draft → ready 判断~~ → merge 完了
+- ~~`models verify-tools` canary 再実施~~ → 連続2回 verified(max_output_tokens 256 へ
+  上げることが必須だった。64 では reasoning tokens に食われて arguments が途切れた)
+- app 経由(191 tools)での web_search 型送出は今回未検証。CLI と同じ型集合なら同じ翻訳で通る
