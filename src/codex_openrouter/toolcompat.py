@@ -230,7 +230,9 @@ def _body(model: str, spec: dict[str, Any], *, freeform: bool) -> dict[str, Any]
         "input": f"Call {name} exactly once with PING. Do not return a message.",
         "tools": [tool],
         "tool_choice": {"type": tool["type"], "name": name},
-        "max_output_tokens": 64,
+        # 64ではreasoning tokensに食われてfunction_callのargumentsが
+        # 途切れた(実測: `{"content": "` で打ち切り)。256で余裕を持つ。
+        "max_output_tokens": 256,
     }
     if spec.get("zdr_supported", True):
         # provider抽選ノイズを消す。endpointが毎回変わると structured_outputs
